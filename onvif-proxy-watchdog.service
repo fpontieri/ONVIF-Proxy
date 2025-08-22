@@ -1,0 +1,27 @@
+[Unit]
+Description=ONVIF Proxy Watchdog Service
+Documentation=https://github.com/your-repo/onvif-proxy
+After=network.target onvif-proxy.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/onvif-proxy
+ExecStart=/usr/bin/python3 /opt/onvif-proxy/src/watchdog.py --daemon --config /var/lib/onvif-proxy/config.xml
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=onvif-proxy-watchdog
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/onvif-proxy /var/log /var/lib/onvif-proxy
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

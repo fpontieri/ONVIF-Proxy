@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<onvif_proxy>
+    <system>
+        <enabled>true</enabled>
+        <base_interface>eth0</base_interface>
+        <base_ip_range>192.168.1.100</base_ip_range>
+        <pushover_token></pushover_token>
+        <pushover_user></pushover_user>
+        <web_port>8080</web_port>
+    </system>
+    <cameras>
+        <!-- Example camera configuration -->
+        <!--
+        <camera id="1">
+            <name>Camera 1</name>
+            <enabled>true</enabled>
+            <rtsp_url>rtsp://192.168.1.10:554/stream</rtsp_url>
+            <rtsp_username></rtsp_username>
+            <rtsp_password></rtsp_password>
+            <onvif_ip>192.168.1.101</onvif_ip>
+            <onvif_port>80</onvif_port>
+            <mac_address>02:00:00:00:00:01</mac_address>
+            <last_ping_status>unknown</last_ping_status>
+            <notifications_enabled>true</notifications_enabled>
+        </camera>
+        -->
+    </cameras>
+</onvif_proxy>

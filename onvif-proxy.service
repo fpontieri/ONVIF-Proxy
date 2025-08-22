@@ -1,0 +1,36 @@
+[Unit]
+Description=ONVIF Proxy Service
+Documentation=https://github.com/your-repo/onvif-proxy
+After=network.target network-online.target
+Wants=network-online.target
+Requires=systemd-networkd.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/onvif-proxy
+ExecStart=/usr/bin/python3 /opt/onvif-proxy/src/main_service.py --daemon --config /var/lib/onvif-proxy/config.xml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=onvif-proxy
+
+# Security settings
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+ReadWritePaths=/opt/onvif-proxy /var/log /etc/systemd/network /var/lib/onvif-proxy /var/lib/dhcp /run /tmp
+PrivateTmp=false
+ProtectKernelTunables=false
+ProtectKernelModules=false
+ProtectControlGroups=false
+
+# Network capabilities
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target

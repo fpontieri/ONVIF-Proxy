@@ -1,0 +1,924 @@
+{% extends "base.html" %}
+
+{% block title %}{{ 'Edit Camera' if camera else 'Add Camera' }} - ONVIF Proxy{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">{{ 'Edit Camera' if camera else 'Add New Camera' }}</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <div class="btn-group me-2">
+            <a href="{{ url_for('cameras') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-arrow-left"></i> Back to Cameras
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-camera"></i> Camera Configuration
+                </h5>
+            </div>
+            <div class="card-body">
+                <form method="POST">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="name" class="form-label">Camera Name</label>
+                                <input type="text" class="form-control" id="name" name="name" 
+                                       value="{{ camera.name if camera else '' }}" required>
+                                <div class="form-text">A friendly name for this camera</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <div class="form-check form-switch mt-4">
+                                    <input class="form-check-input" type="checkbox" id="enabled" name="enabled" 
+                                           {{ 'checked' if not camera or camera.enabled }}>
+                                    <label class="form-check-label" for="enabled">
+                                        Enable Camera
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <hr>
+                    <h6 class="text-muted mb-3">RTSP Source Configuration</h6>
+
+                    <div class="mb-3">
+                        <label for="rtsp_url" class="form-label">RTSP URL</label>
+                        <div class="input-group">
+                            <input type="url" class="form-control" id="rtsp_url" name="rtsp_url" 
+                                   value="{{ camera.rtsp_url if camera else '' }}" required
+                                   placeholder="rtsp://username:password@192.168.1.100:554/stream">
+                            <button type="button" class="btn btn-outline-primary" id="validate-rtsp-btn" title="Validate RTSP stream and get video parameters">
+                                <i class="fas fa-check-circle"></i> Validate
+                            </button>
+                        </div>
+                        <div class="form-text">Complete RTSP URL including protocol, IP, port and path. Format: rtsp://[username]:[password]@[IP]:[port]/[path]</div>
+                        <div id="rtsp-validation-result" class="mt-2"></div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="resolution" class="form-label">Resolution</label>
+                                <input type="text" class="form-control" id="resolution" name="resolution" 
+                                       value="{{ camera.resolution if camera and camera.resolution else '' }}"
+                                       placeholder="e.g. 1920x1080">
+                                <div class="form-text">Width x Height (e.g. 1920x1080)</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="fps" class="form-label">FPS</label>
+                                <input type="number" class="form-control" id="fps" name="fps" 
+                                       value="{{ camera.fps if camera and camera.fps is not none else '' }}"
+                                       placeholder="e.g. 15">
+                                <div class="form-text">Frames per second</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="bitrate_kbps" class="form-label">Bitrate (kbps)</label>
+                                <input type="number" class="form-control" id="bitrate_kbps" name="bitrate_kbps" 
+                                       value="{{ camera.bitrate_kbps if camera and camera.bitrate_kbps is not none else '' }}"
+                                       placeholder="e.g. 2048">
+                                <div class="form-text">Video bitrate in kbps</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="rtsp_username" class="form-label">RTSP Username</label>
+                                <input type="text" class="form-control" id="rtsp_username" name="rtsp_username" 
+                                       value="{{ camera.rtsp_username if camera else '' }}">
+                                <div class="form-text">Leave empty if no authentication required</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="rtsp_password" class="form-label">RTSP Password</label>
+                                <input type="password" class="form-control" id="rtsp_password" name="rtsp_password" 
+                                       value="{{ camera.rtsp_password if camera else '' }}">
+                                <div class="form-text">Leave empty if no authentication required</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <hr>
+                    <h6 class="text-muted mb-3">ONVIF Network Configuration</h6>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="base_interface" class="form-label">Base Network Interface</label>
+                                <select class="form-select" id="base_interface" name="base_interface" required>
+                                    {% for interface in interfaces %}
+                                    <option value="{{ interface }}" {{ 'selected' if interface == (camera.base_interface if camera else system_config.base_interface) }}>
+                                        {{ interface }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <div class="form-text">Network interface to create the virtual camera on</div>
+                                <div id="interface-info" class="mt-2"></div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="onvif_port" class="form-label">ONVIF Port</label>
+                                <input type="number" class="form-control" id="onvif_port" name="onvif_port" 
+                                       value="{{ camera.onvif_port if camera else (defaults.onvif_port if defaults else 80) }}" 
+                                       min="1" max="65535" required>
+                                <div class="form-text">Port for ONVIF web service (usually 80)</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="use_dhcp" name="use_dhcp" 
+                                           {{ 'checked' if camera and camera.use_dhcp }}>
+                                    <label class="form-check-label" for="use_dhcp">
+                                        Use DHCP for IP Assignment
+                                    </label>
+                                    <div class="form-text">Automatically assign IP via DHCP (experimental - static IP recommended)</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3" id="static-ip-section">
+                                <label for="onvif_ip" class="form-label">ONVIF IP Address</label>
+                                <div class="input-group">
+                                    <input type="text" class="form-control" id="onvif_ip" name="onvif_ip" 
+                                           value="{{ camera.onvif_ip if camera else (defaults.onvif_ip if defaults else '') }}" 
+                                           pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$" required>
+                                    <button type="button" class="btn btn-outline-secondary" id="suggest-camera-ip-btn" title="Suggest IP based on interface">
+                                        <i class="fas fa-magic"></i> Auto
+                                    </button>
+                                </div>
+                                <div class="form-text">Static IP address for the virtual ONVIF camera interface</div>
+                                <div id="ip-suggestions" class="mt-2"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="mac_address" class="form-label">MAC Address</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="mac_address" name="mac_address" 
+                                   value="{{ camera.onvif_mac if camera else camera.mac_address if camera else (defaults.mac_address if defaults else '') }}" 
+                                   pattern="^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$" required>
+                            <button type="button" class="btn btn-outline-secondary" id="generate-mac-btn" title="Generate random MAC address">
+                                <i class="fas fa-random"></i> Generate
+                            </button>
+                        </div>
+                        <div class="form-text">MAC address for the virtual network interface (format: 02:00:00:00:00:01)</div>
+                    </div>
+
+                    <!-- Interface Parameters Display -->
+                    <div class="card bg-light mt-3" id="interface-params" style="display: none;">
+                        <div class="card-header">
+                            <h6 class="mb-0">
+                                <i class="fas fa-network-wired"></i> Virtual Interface Parameters
+                            </h6>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <small class="text-muted">Interface Name:</small><br>
+                                    <code id="interface-name">-</code>
+                                </div>
+                                <div class="col-md-6">
+                                    <small class="text-muted">Interface Type:</small><br>
+                                    <code id="interface-type">macvlan</code>
+                                </div>
+                            </div>
+                            <div class="row mt-2">
+                                <div class="col-md-6">
+                                    <small class="text-muted">Parent Interface:</small><br>
+                                    <code id="parent-interface">-</code>
+                                </div>
+                                <div class="col-md-6">
+                                    <small class="text-muted">IP Configuration:</small><br>
+                                    <code id="ip-config">-</code>
+                                </div>
+                            </div>
+                            <div class="row mt-2">
+                                <div class="col-md-12">
+                                    <small class="text-muted">Systemd Network File:</small><br>
+                                    <code id="network-file">-</code>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <hr>
+                    <h6 class="text-muted mb-3">Notification Settings</h6>
+
+                    <div class="mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="notifications_enabled" name="notifications_enabled" 
+                                   {{ 'checked' if not camera or camera.notifications_enabled }}>
+                            <label class="form-check-label" for="notifications_enabled">
+                                Enable Notifications
+                            </label>
+                            <div class="form-text">Send Pushover notifications when camera goes online/offline</div>
+                        </div>
+                    </div>
+
+                    <div class="d-flex justify-content-between">
+                        <a href="{{ url_for('cameras') }}" class="btn btn-secondary">
+                            <i class="fas fa-times"></i> Cancel
+                        </a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-save"></i> {{ 'Update Camera' if camera else 'Add Camera' }}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="mb-0">
+                    <i class="fas fa-info-circle"></i> Configuration Help
+                </h6>
+            </div>
+            <div class="card-body">
+                <h6>RTSP URL Format:</h6>
+                <p class="small text-muted">
+                    The RTSP URL should include the complete path to your camera's stream:
+                </p>
+                <code class="small">rtsp://ip:port/path</code>
+                
+                <hr>
+                
+                <h6>Network Configuration:</h6>
+                <p class="small text-muted">
+                    Each camera gets a unique IP address and MAC address. The system will create a virtual network interface for each camera.
+                </p>
+                
+                <hr>
+                
+                <h6>Common RTSP Paths:</h6>
+                <ul class="small text-muted">
+                    <li><strong>Hikvision:</strong> /Streaming/Channels/101</li>
+                    <li><strong>Dahua:</strong> /cam/realmonitor?channel=1&subtype=0</li>
+                    <li><strong>Axis:</strong> /axis-media/media.amp</li>
+                    <li><strong>Generic:</strong> /stream or /live</li>
+                </ul>
+            </div>
+        </div>
+
+        {% if camera %}
+        <div class="card mt-3">
+            <div class="card-header">
+                <h6 class="mb-0">
+                    <i class="fas fa-tools"></i> Camera Testing
+                </h6>
+            </div>
+            <div class="card-body">
+                <button type="button" class="btn btn-outline-primary w-100 mb-2" onclick="testCamera(this, '{{ camera.id }}')">
+                    <i class="fas fa-network-wired"></i> Test Connection
+                </button>
+                <button type="button" class="btn btn-outline-success w-100" onclick="openStreamModal('{{ camera.id }}')">
+                    <i class="fas fa-video"></i> View Live Stream
+                </button>
+                <div class="form-text mt-2">
+                    Test network connectivity or view live camera stream
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Live Stream Modal -->
+<div class="modal fade" id="streamModal" tabindex="-1" aria-labelledby="streamModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="streamModalLabel">
+                    <i class="fas fa-video"></i> Live Camera Stream
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="stream-container bg-dark rounded d-flex align-items-center justify-content-center" style="min-height: 400px;">
+                            <div id="stream-loading" class="text-center text-light">
+                                <div class="spinner-border" role="status">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                                <div class="mt-2">Connecting to camera stream...</div>
+                            </div>
+                            <img id="stream-image" class="img-fluid rounded" style="display: none; max-height: 400px;" alt="Camera Stream">
+                            <div id="stream-error" class="text-center text-danger" style="display: none;">
+                                <i class="fas fa-exclamation-triangle fa-3x mb-3"></i>
+                                <div>Failed to load camera stream</div>
+                                <small id="stream-error-message"></small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0"><i class="fas fa-info-circle"></i> Stream Information</h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-2">
+                                    <small class="text-muted">Camera Name:</small><br>
+                                    <strong id="stream-camera-name">-</strong>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">RTSP URL:</small><br>
+                                    <code id="stream-rtsp-url" class="small">-</code>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">Status:</small><br>
+                                    <span id="stream-status" class="badge bg-secondary">Connecting</span>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">Resolution:</small><br>
+                                    <span id="stream-resolution">-</span>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">Frame Rate:</small><br>
+                                    <span id="stream-fps">-</span>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">Bitrate:</small><br>
+                                    <span id="stream-bitrate">-</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card mt-3">
+                            <div class="card-header">
+                                <h6 class="mb-0"><i class="fas fa-network-wired"></i> Connection Test</h6>
+                            </div>
+                            <div class="card-body">
+                                <button type="button" class="btn btn-outline-primary btn-sm w-100" onclick="testCameraConnection(this)">
+                                    <i class="fas fa-satellite-dish"></i> Test Network Connection
+                                </button>
+                                <div id="connection-test-result" class="mt-2"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="fas fa-times"></i> Close
+                </button>
+                <button type="button" class="btn btn-primary" onclick="refreshStream()">
+                    <i class="fas fa-refresh"></i> Refresh Stream
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Function to generate random MAC address
+function generateMacAddress() {
+    const mac = '02:00:00:' + 
+               Math.floor(Math.random() * 256).toString(16).padStart(2, '0') + ':' +
+               Math.floor(Math.random() * 256).toString(16).padStart(2, '0') + ':' +
+               Math.floor(Math.random() * 256).toString(16).padStart(2, '0');
+    return mac;
+}
+
+// Function to update interface information
+function updateInterfaceInfo(interfaceName) {
+    if (!interfaceName) return;
+    
+    const infoDiv = document.getElementById('interface-info');
+    const suggestionsDiv = document.getElementById('ip-suggestions');
+    
+    infoDiv.innerHTML = '<small class="text-muted"><i class="fas fa-spinner fa-spin"></i> Loading interface info...</small>';
+    
+    fetch(`/api/interface/${interfaceName}/addresses`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                let infoHtml = '';
+                if (data.addresses.length > 0) {
+                    infoHtml = `<small class="text-success">
+                        <i class="fas fa-check-circle"></i> Current IPs: ${data.addresses.join(', ')}
+                    </small>`;
+                } else {
+                    infoHtml = '<small class="text-warning"><i class="fas fa-exclamation-triangle"></i> No IP addresses found</small>';
+                }
+                infoDiv.innerHTML = infoHtml;
+                
+                // Update interface parameters display
+                updateInterfaceParams(interfaceName);
+            } else {
+                infoDiv.innerHTML = `<small class="text-danger"><i class="fas fa-times-circle"></i> Error: ${data.error}</small>`;
+            }
+        })
+        .catch(error => {
+            infoDiv.innerHTML = `<small class="text-danger"><i class="fas fa-times-circle"></i> Failed to load interface info</small>`;
+        });
+}
+
+// Function to update interface parameters display
+function updateInterfaceParams(baseInterface) {
+    const cameraName = document.getElementById('name').value || 'camera';
+    const macAddress = document.getElementById('mac_address').value;
+    const useDhcp = document.getElementById('use_dhcp').checked;
+    const staticIp = document.getElementById('onvif_ip').value;
+    
+    // Generate interface name (simplified version of what the system would create)
+    const derivedInterfaceName = `onvif-${cameraName.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+    
+    document.getElementById('interface-name').textContent = derivedInterfaceName;
+    document.getElementById('parent-interface').textContent = baseInterface || '-';
+    document.getElementById('ip-config').textContent = useDhcp ? 'DHCP' : (staticIp || 'Static IP');
+    document.getElementById('network-file').textContent = `/etc/systemd/network/${derivedInterfaceName}.network`;
+    
+    // Show the parameters card
+    document.getElementById('interface-params').style.display = 'block';
+}
+
+// Function to use suggested IP
+function useSuggestedIP(ip) {
+    document.getElementById('onvif_ip').value = ip;
+    document.getElementById('ip-suggestions').innerHTML = '<small class="text-success"><i class="fas fa-check"></i> IP updated!</small>';
+    setTimeout(() => {
+        document.getElementById('ip-suggestions').innerHTML = '';
+    }, 2000);
+    updateInterfaceParams(document.getElementById('base_interface').value);
+}
+
+// Function to toggle DHCP/Static IP sections
+function toggleIpSection() {
+    const useDhcp = document.getElementById('use_dhcp').checked;
+    const staticSection = document.getElementById('static-ip-section');
+    const ipInput = document.getElementById('onvif_ip');
+    
+    if (useDhcp) {
+        staticSection.style.opacity = '0.5';
+        ipInput.disabled = true;
+        ipInput.removeAttribute('required');
+    } else {
+        staticSection.style.opacity = '1';
+        ipInput.disabled = false;
+        ipInput.setAttribute('required', 'required');
+    }
+    
+    // Update interface parameters
+    const interfaceName = document.getElementById('base_interface').value;
+    if (interfaceName) {
+        updateInterfaceParams(interfaceName);
+    }
+}
+
+// Event Listeners
+document.addEventListener('DOMContentLoaded', function() {
+    // Auto-generate MAC address if empty on focus
+    document.getElementById('mac_address').addEventListener('focus', function() {
+        if (!this.value) {
+            this.value = generateMacAddress();
+            updateInterfaceParams(document.getElementById('base_interface').value);
+        }
+    });
+
+    // Generate MAC address button
+    document.getElementById('generate-mac-btn').addEventListener('click', function() {
+        document.getElementById('mac_address').value = generateMacAddress();
+        updateInterfaceParams(document.getElementById('base_interface').value);
+    });
+
+    // DHCP toggle
+    document.getElementById('use_dhcp').addEventListener('change', toggleIpSection);
+
+    // Interface selection change
+    document.getElementById('base_interface').addEventListener('change', function() {
+        updateInterfaceInfo(this.value);
+    });
+
+    // Camera IP suggestion button
+    document.getElementById('suggest-camera-ip-btn').addEventListener('click', function() {
+        const selectedInterface = document.getElementById('base_interface').value;
+        if (selectedInterface) {
+            const suggestionsDiv = document.getElementById('ip-suggestions');
+            suggestionsDiv.innerHTML = '<small class="text-muted"><i class="fas fa-spinner fa-spin"></i> Getting suggestions...</small>';
+            
+            fetch(`/api/interface/${selectedInterface}/addresses`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.suggested_base) {
+                        suggestionsDiv.innerHTML = `
+                            <small class="text-info">
+                                <i class="fas fa-lightbulb"></i> 
+                                Suggested IP: <strong>${data.suggested_base}</strong>
+                                <button type="button" class="btn btn-link btn-sm p-0 ms-1" onclick="useSuggestedIP('${data.suggested_base}')">
+                                    Use this
+                                </button>
+                            </small>`;
+                    } else {
+                        suggestionsDiv.innerHTML = '<small class="text-warning"><i class="fas fa-exclamation-triangle"></i> No suggestions available</small>';
+                    }
+                })
+                .catch(error => {
+                    suggestionsDiv.innerHTML = '<small class="text-danger"><i class="fas fa-times-circle"></i> Failed to get suggestions</small>';
+                });
+        }
+    });
+
+    // Camera name change updates interface params
+    document.getElementById('name').addEventListener('input', function() {
+        const interfaceName = document.getElementById('base_interface').value;
+        if (interfaceName) {
+            updateInterfaceParams(interfaceName);
+        }
+    });
+
+    // DHCP checkbox toggle
+    document.getElementById('use_dhcp').addEventListener('change', function() {
+        const staticIpSection = document.getElementById('static-ip-section');
+        const onvifIpInput = document.getElementById('onvif_ip');
+        
+        if (this.checked) {
+            staticIpSection.style.opacity = '0.5';
+            onvifIpInput.disabled = true;
+            onvifIpInput.required = false;
+        } else {
+            staticIpSection.style.opacity = '1';
+            onvifIpInput.disabled = false;
+            onvifIpInput.required = true;
+        }
+    });
+
+    // IP address change updates interface params
+    document.getElementById('onvif_ip').addEventListener('input', function() {
+        const interfaceName = document.getElementById('base_interface').value;
+        if (interfaceName) {
+            updateInterfaceParams(interfaceName);
+        }
+    });
+
+    // RTSP URL change updates interface params
+    document.getElementById('rtsp_url').addEventListener('input', function() {
+        const interfaceName = document.getElementById('base_interface').value;
+        if (interfaceName) {
+            updateInterfaceParams(interfaceName);
+        }
+    });
+
+    // RTSP URL validation button
+    document.getElementById('validate-rtsp-btn').addEventListener('click', function() {
+        // Parse URL first, then validate
+        const url = document.getElementById('rtsp_url').value;
+        parseRtspUrl(url);
+        validateRtspUrl();
+    });
+
+    // RTSP URL change - parse credentials
+    document.getElementById('rtsp_url').addEventListener('input', function() {
+        parseRtspUrl(this.value);
+    });
+
+    // Initial setup - only update interface info, don't toggle IP section to preserve form values
+    const currentInterface = document.getElementById('base_interface').value;
+    if (currentInterface) {
+        updateInterfaceInfo(currentInterface);
+        updateInterfaceParams(currentInterface);
+    }
+    
+    // Set initial IP section state based on DHCP checkbox without clearing values
+    const useDhcp = document.getElementById('use_dhcp').checked;
+    const staticSection = document.getElementById('static-ip-section');
+    const ipInput = document.getElementById('onvif_ip');
+    
+    if (useDhcp) {
+        staticSection.style.opacity = '0.5';
+        ipInput.disabled = true;
+        ipInput.removeAttribute('required');
+    } else {
+        staticSection.style.opacity = '1';
+        ipInput.disabled = false;
+        ipInput.setAttribute('required', 'required');
+    }
+});
+
+// Function to parse RTSP URL and populate credentials
+function parseRtspUrl(url) {
+    if (!url || !url.startsWith('rtsp://')) {
+        if (url) {
+            showAlert('warning', 'RTSP URL should start with rtsp://');
+        }
+        return;
+    }
+    
+    try {
+        const urlObj = new URL(url);
+        
+        // Extract username and password if present
+        if (urlObj.username) {
+            document.getElementById('rtsp_username').value = urlObj.username;
+        }
+        if (urlObj.password) {
+            document.getElementById('rtsp_password').value = urlObj.password;
+        }
+    } catch (error) {
+        console.log('Invalid URL format:', error);
+    }
+}
+
+// Function to validate RTSP URL and get stream parameters
+function validateRtspUrl() {
+    const url = document.getElementById('rtsp_url').value;
+    const resultDiv = document.getElementById('rtsp-validation-result');
+    const validateBtn = document.getElementById('validate-rtsp-btn');
+    
+    if (!url) {
+        resultDiv.innerHTML = '<small class="text-warning"><i class="fas fa-exclamation-triangle"></i> Please enter an RTSP URL first</small>';
+        return;
+    }
+    
+    // Show loading state
+    validateBtn.disabled = true;
+    validateBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Validating...';
+    resultDiv.innerHTML = '<small class="text-info"><i class="fas fa-spinner fa-spin"></i> Probing RTSP stream...</small>';
+    
+    // Make request to validate endpoint
+    fetch('/api/rtsp/validate', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ rtsp_url: url })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Populate form fields with detected values
+            if (data.resolution) {
+                document.getElementById('resolution').value = data.resolution;
+            }
+            if (data.fps) {
+                document.getElementById('fps').value = Math.floor(data.fps); // Ensure integer
+            }
+            if (data.bitrate_kbps) {
+                document.getElementById('bitrate_kbps').value = data.bitrate_kbps;
+            }
+            
+            // Show success message
+            resultDiv.innerHTML = `
+                <small class="text-success">
+                    <i class="fas fa-check-circle"></i> Stream validated successfully!
+                    Resolution: ${data.resolution || 'Unknown'}, 
+                    FPS: ${data.fps || 'Unknown'}, 
+                    Bitrate: ${data.bitrate_kbps ? data.bitrate_kbps + ' kbps' : 'Unknown'}
+                </small>`;
+        } else {
+            // Show error with suggestion for defaults
+            const defaultRes = '1280x720';
+            const defaultFps = '15';
+            const defaultBitrate = '2048';
+            
+            resultDiv.innerHTML = `
+                <div class="alert alert-warning alert-sm mt-2">
+                    <i class="fas fa-exclamation-triangle"></i> <strong>Validation failed:</strong> ${data.error}<br>
+                    <small>Suggested defaults: Resolution: ${defaultRes}, FPS: ${defaultFps}, Bitrate: ${defaultBitrate} kbps</small><br>
+                    <button type="button" class="btn btn-sm btn-outline-primary mt-1" onclick="useDefaultValues('${defaultRes}', '${defaultFps}', '${defaultBitrate}')">
+                        Use Default Values
+                    </button>
+                </div>`;
+        }
+    })
+    .catch(error => {
+        resultDiv.innerHTML = `<small class="text-danger"><i class="fas fa-times-circle"></i> Network error: ${error.message}</small>`;
+    })
+    .finally(() => {
+        // Reset button state
+        validateBtn.disabled = false;
+        validateBtn.innerHTML = '<i class="fas fa-check-circle"></i> Validate';
+    });
+}
+
+// Function to use default values
+function useDefaultValues(resolution, fps, bitrate) {
+    document.getElementById('resolution').value = resolution;
+    document.getElementById('fps').value = fps;
+    document.getElementById('bitrate_kbps').value = bitrate;
+    
+    const resultDiv = document.getElementById('rtsp-validation-result');
+    resultDiv.innerHTML = '<small class="text-success"><i class="fas fa-check"></i> Default values applied!</small>';
+    setTimeout(() => {
+        resultDiv.innerHTML = '';
+    }, 3000);
+}
+
+// Global variables for stream modal
+let currentCameraId = null;
+let streamInterval = null;
+
+// Function to open stream modal
+function openStreamModal(cameraId) {
+    currentCameraId = cameraId;
+    
+    // Get camera data from form or fetch from server
+    const cameraName = document.getElementById('name').value || 'Unknown Camera';
+    const rtspUrl = document.getElementById('rtsp_url').value || '';
+    
+    // Update modal info
+    document.getElementById('stream-camera-name').textContent = cameraName;
+    document.getElementById('stream-rtsp-url').textContent = rtspUrl;
+    
+    // Reset modal state
+    resetStreamModal();
+    
+    // Show modal
+    const modal = new bootstrap.Modal(document.getElementById('streamModal'));
+    modal.show();
+    
+    // Start stream
+    startStream(cameraId);
+}
+
+// Function to reset stream modal
+function resetStreamModal() {
+    document.getElementById('stream-loading').style.display = 'block';
+    document.getElementById('stream-image').style.display = 'none';
+    document.getElementById('stream-error').style.display = 'none';
+    document.getElementById('stream-status').className = 'badge bg-secondary';
+    document.getElementById('stream-status').textContent = 'Connecting';
+    document.getElementById('stream-resolution').textContent = '-';
+    document.getElementById('stream-fps').textContent = '-';
+    document.getElementById('stream-bitrate').textContent = '-';
+    document.getElementById('connection-test-result').innerHTML = '';
+    
+    // Clear any existing interval
+    if (streamInterval) {
+        clearInterval(streamInterval);
+        streamInterval = null;
+    }
+}
+
+// Function to start stream
+function startStream(cameraId) {
+    fetch(`/camera/${cameraId}/stream`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Show stream image
+                const streamImg = document.getElementById('stream-image');
+                streamImg.src = data.stream_url;
+                streamImg.onload = function() {
+                    document.getElementById('stream-loading').style.display = 'none';
+                    document.getElementById('stream-image').style.display = 'block';
+                    document.getElementById('stream-status').className = 'badge bg-success';
+                    document.getElementById('stream-status').textContent = 'Connected';
+                    
+                    // Update stream info if available
+                    if (data.resolution) {
+                        document.getElementById('stream-resolution').textContent = data.resolution;
+                    }
+                    if (data.fps) {
+                        document.getElementById('stream-fps').textContent = data.fps + ' fps';
+                    }
+                    if (data.bitrate_kbps) {
+                        const kbps = Number(data.bitrate_kbps);
+                        let text = kbps + ' kbps';
+                        if (!isNaN(kbps) && kbps >= 1000) {
+                            const mbps = (kbps / 1000).toFixed(2);
+                            text = `${mbps} Mbps`;
+                        }
+                        document.getElementById('stream-bitrate').textContent = text;
+                    }
+                };
+                streamImg.onerror = function() {
+                    showStreamError('Failed to load stream image');
+                };
+                
+                // Set up periodic refresh
+                streamInterval = setInterval(() => {
+                    streamImg.src = data.stream_url + '?t=' + Date.now();
+                }, 1000); // Refresh every second
+                
+            } else {
+                showStreamError(data.error || 'Failed to start stream');
+            }
+        })
+        .catch(error => {
+            showStreamError('Network error: ' + error.message);
+        });
+}
+
+// Function to show stream error
+function showStreamError(message) {
+    document.getElementById('stream-loading').style.display = 'none';
+    document.getElementById('stream-image').style.display = 'none';
+    document.getElementById('stream-error').style.display = 'block';
+    document.getElementById('stream-error-message').textContent = message;
+    document.getElementById('stream-status').className = 'badge bg-danger';
+    document.getElementById('stream-status').textContent = 'Error';
+}
+
+// Function to refresh stream
+function refreshStream() {
+    if (currentCameraId) {
+        resetStreamModal();
+        startStream(currentCameraId);
+    }
+}
+
+// Function to test camera connection
+function testCameraConnection(button) {
+    if (!currentCameraId) return;
+    
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing...';
+    button.disabled = true;
+    
+    fetch(`/camera/${currentCameraId}/test`)
+        .then(response => response.json())
+        .then(data => {
+            const resultDiv = document.getElementById('connection-test-result');
+            if (data.success) {
+                const pingResults = data.ping_results;
+                resultDiv.innerHTML = `
+                    <div class="alert alert-success alert-sm mt-2">
+                        <strong>Connection OK</strong><br>
+                        <small>Packet loss: ${pingResults.packet_loss}<br>
+                        Avg time: ${pingResults.avg_time}</small>
+                    </div>`;
+            } else {
+                resultDiv.innerHTML = `
+                    <div class="alert alert-danger alert-sm mt-2">
+                        <strong>Connection Failed</strong><br>
+                        <small>${data.error}</small>
+                    </div>`;
+            }
+        })
+        .catch(error => {
+            document.getElementById('connection-test-result').innerHTML = `
+                <div class="alert alert-danger alert-sm mt-2">
+                    <strong>Test Error</strong><br>
+                    <small>${error.message}</small>
+                </div>`;
+        })
+        .finally(() => {
+            button.innerHTML = originalText;
+            button.disabled = false;
+        });
+}
+
+// Original test camera function for connection testing
+function testCamera(button, cameraId) {
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing...';
+    button.disabled = true;
+    
+    fetch(`/camera/${cameraId}/test`)
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const pingResults = data.ping_results;
+            showAlert('success', `Camera test successful! Packet loss: ${pingResults.packet_loss}, Avg time: ${pingResults.avg_time}`);
+        } else {
+            showAlert('danger', 'Camera test failed: ' + data.error);
+        }
+    })
+    .catch(error => {
+        showAlert('danger', 'Test error: ' + error.message);
+    })
+    .finally(() => {
+        button.innerHTML = originalText;
+        button.disabled = false;
+    });
+}
+
+// Clean up when modal is closed
+document.addEventListener('DOMContentLoaded', function() {
+    const streamModal = document.getElementById('streamModal');
+    if (streamModal) {
+        streamModal.addEventListener('hidden.bs.modal', function() {
+            if (streamInterval) {
+                clearInterval(streamInterval);
+                streamInterval = null;
+            }
+            currentCameraId = null;
+        });
+    }
+});
+</script>
+{% endblock %}

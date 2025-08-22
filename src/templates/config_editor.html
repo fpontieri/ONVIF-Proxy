@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}Config Editor{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Configuration Editor</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <div class="btn-group me-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="downloadConfig()">
+                <i class="fas fa-download"></i> Download
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="resetConfig()">
+                <i class="fas fa-undo"></i> Reset
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-file-code"></i> Raw Configuration File
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-warning" role="alert">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <strong>Warning:</strong> Editing the raw configuration file directly can break your system if invalid XML is entered. 
+                    Make sure to backup your configuration before making changes.
+                </div>
+                
+                <form method="POST">
+                    <div class="mb-3">
+                        <label for="config_content" class="form-label">Configuration Content</label>
+                        <textarea class="form-control font-monospace" 
+                                  id="config_content" 
+                                  name="config_content" 
+                                  rows="25" 
+                                  style="font-size: 0.9em;">{{ config_content }}</textarea>
+                    </div>
+                    
+                    <div class="d-flex justify-content-between">
+                        <div>
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Save Configuration
+                            </button>
+                            <button type="button" class="btn btn-secondary" onclick="validateXML()">
+                                <i class="fas fa-check-circle"></i> Validate XML
+                            </button>
+                        </div>
+                        <div>
+                            <small class="text-muted">
+                                <i class="fas fa-info-circle"></i> 
+                                Changes will trigger a service reload automatically
+                            </small>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function downloadConfig() {
+    const content = document.getElementById('config_content').value;
+    const blob = new Blob([content], { type: 'application/xml' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'config.xml';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+}
+
+function resetConfig() {
+    if (confirm('Are you sure you want to reset the configuration to the last saved version? This will discard all unsaved changes.')) {
+        location.reload();
+    }
+}
+
+function validateXML() {
+    const content = document.getElementById('config_content').value;
+    try {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(content, 'application/xml');
+        const errorNode = doc.querySelector('parsererror');
+        
+        if (errorNode) {
+            showAlert('danger', 'XML Validation Failed: ' + errorNode.textContent);
+        } else {
+            showAlert('success', 'XML is valid!');
+        }
+    } catch (e) {
+        showAlert('danger', 'XML Validation Error: ' + e.message);
+    }
+}
+
+// Auto-save warning
+let originalContent = document.getElementById('config_content').value;
+let hasUnsavedChanges = false;
+
+document.getElementById('config_content').addEventListener('input', function() {
+    hasUnsavedChanges = (this.value !== originalContent);
+});
+
+window.addEventListener('beforeunload', function(e) {
+    if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = 'You have unsaved changes. Are you sure you want to leave?';
+    }
+});
+
+// Reset unsaved changes flag on form submit
+document.querySelector('form').addEventListener('submit', function() {
+    hasUnsavedChanges = false;
+});
+</script>
+{% endblock %}

@@ -1,0 +1,295 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - ONVIF Proxy{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Dashboard</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <div class="btn-group me-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="location.reload()">
+                <i class="fas fa-sync-alt"></i> Refresh
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- System Status Cards -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card text-white bg-primary">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h5 class="card-title">System Status</h5>
+                        <h3 data-status="system_enabled">{{ 'Enabled' if system_status.enabled else 'Disabled' }}</h3>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-server fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card text-white bg-success">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h5 class="card-title">Total Cameras</h5>
+                        <h3 data-status="total_cameras">{{ system_status.total_cameras }}</h3>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-camera fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card text-white bg-info">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h5 class="card-title">Active Cameras</h5>
+                        <h3 data-status="active_cameras">{{ system_status.active_cameras }}</h3>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-video fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card text-white {{ 'bg-success' if system_status.pushover_configured else 'bg-warning' }}">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h5 class="card-title">Notifications</h5>
+                        <h6>{{ 'Configured' if system_status.pushover_configured else 'Not Configured' }}</h6>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-bell fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- System Configuration -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-cog"></i> System Configuration
+                </h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tr>
+                        <td><strong>Base Interface:</strong></td>
+                        <td>{{ system_config.base_interface }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>IP Range:</strong></td>
+                        <td>{{ system_config.base_ip_range }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Web Port:</strong></td>
+                        <td>{{ system_config.web_port }}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Pushover Token:</strong></td>
+                        <td>{{ '***configured***' if system_config.pushover_token else 'Not configured' }}</td>
+                    </tr>
+                </table>
+                <a href="{{ url_for('settings') }}" class="btn btn-primary btn-sm">
+                    <i class="fas fa-edit"></i> Edit Settings
+                </a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">
+                    <i class="fas fa-chart-line"></i> Quick Actions
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <a href="{{ url_for('add_camera') }}" class="btn btn-success">
+                        <i class="fas fa-plus"></i> Add New Camera
+                    </a>
+                    <button type="button" class="btn btn-info" onclick="testNotification()">
+                        <i class="fas fa-bell"></i> Test Notification
+                    </button>
+                    <a href="{{ url_for('cameras') }}" class="btn btn-primary">
+                        <i class="fas fa-camera"></i> Manage Cameras
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Camera Status -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0">
+            <i class="fas fa-video"></i> Camera Status
+        </h5>
+    </div>
+    <div class="card-body">
+        {% if cameras %}
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Name</th>
+                            <th>ONVIF IP</th>
+                            <th>Port</th>
+                            <th>Last Ping</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for camera in cameras %}
+                        <tr>
+                            <td>
+                                {% if camera.enabled %}
+                                    {% if camera.last_ping_status == 'up' %}
+                                        <span class="status-indicator status-online"></span>Online
+                                    {% elif camera.last_ping_status == 'down' %}
+                                        <span class="status-indicator status-offline"></span>Offline
+                                    {% else %}
+                                        <span class="status-indicator status-unknown"></span>Unknown
+                                    {% endif %}
+                                {% else %}
+                                    <span class="status-indicator status-unknown"></span>Disabled
+                                {% endif %}
+                            </td>
+                            <td>{{ camera.name or 'Camera ' + camera.id }}</td>
+                            <td>{{ camera.onvif_ip }}</td>
+                            <td>{{ camera.onvif_port }}</td>
+                            <td>{{ camera.last_ping_status.title() }}</td>
+                            <td>
+                                <div class="btn-group btn-group-sm" role="group">
+                                    <button type="button" class="btn btn-outline-primary" onclick="testCamera('{{ camera.id }}')">
+                                        <i class="fas fa-network-wired"></i> Test
+                                    </button>
+                                    <a href="{{ url_for('edit_camera', camera_id=camera.id) }}" class="btn btn-outline-secondary">
+                                        <i class="fas fa-edit"></i> Edit
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <div class="text-center py-4">
+                <i class="fas fa-camera fa-3x text-muted mb-3"></i>
+                <h5 class="text-muted">No cameras configured</h5>
+                <p class="text-muted">Add your first camera to get started</p>
+                <a href="{{ url_for('add_camera') }}" class="btn btn-primary">
+                    <i class="fas fa-plus"></i> Add Camera
+                </a>
+            </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function testNotification() {
+    fetch('/test_notification', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showAlert('success', data.message);
+        } else {
+            showAlert('danger', data.error);
+        }
+    })
+    .catch(error => {
+        showAlert('danger', 'Error: ' + error.message);
+    });
+}
+
+function testCamera(cameraId) {
+    const button = event.target.closest('button');
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing...';
+    button.disabled = true;
+    
+    fetch(`/camera/${cameraId}/test`)
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const pingResults = data.ping_results;
+            showAlert('success', `Camera test successful! Packet loss: ${pingResults.packet_loss}, Avg time: ${pingResults.avg_time}`);
+        } else {
+            showAlert('danger', 'Camera test failed: ' + data.error);
+        }
+    })
+    .catch(error => {
+        showAlert('danger', 'Test error: ' + error.message);
+    })
+    .finally(() => {
+        button.innerHTML = originalText;
+        button.disabled = false;
+    });
+}
+
+// Auto-refresh camera status every 60 seconds
+setInterval(() => {
+    fetch('/api/cameras/status')
+        .then(response => response.json())
+        .then(cameras => {
+            cameras.forEach(camera => {
+                const row = document.querySelector(`tr[data-camera-id="${camera.id}"]`);
+                if (row) {
+                    // Update status indicator
+                    const statusCell = row.querySelector('td:first-child');
+                    let statusHtml = '';
+                    if (camera.enabled) {
+                        if (camera.last_ping_status === 'up') {
+                            statusHtml = '<span class="status-indicator status-online"></span>Online';
+                        } else if (camera.last_ping_status === 'down') {
+                            statusHtml = '<span class="status-indicator status-offline"></span>Offline';
+                        } else {
+                            statusHtml = '<span class="status-indicator status-unknown"></span>Unknown';
+                        }
+                    } else {
+                        statusHtml = '<span class="status-indicator status-unknown"></span>Disabled';
+                    }
+                    statusCell.innerHTML = statusHtml;
+                    
+                    // Update last ping status
+                    const pingCell = row.querySelector('td:nth-child(5)');
+                    if (pingCell) {
+                        pingCell.textContent = camera.last_ping_status.charAt(0).toUpperCase() + camera.last_ping_status.slice(1);
+                    }
+                }
+            });
+        })
+        .catch(error => console.log('Camera status update failed:', error));
+}, 60000);
+</script>
+{% endblock %}

@@ -1,0 +1,405 @@
+{% extends "base.html" %}
+
+{% block title %}Cameras - ONVIF Proxy{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+    <h1 class="h2">Camera Management</h1>
+    <div class="btn-toolbar mb-2 mb-md-0">
+        <div class="btn-group me-2">
+            <a href="{{ url_for('add_camera') }}" class="btn btn-primary">
+                <i class="fas fa-plus"></i> Add Camera
+            </a>
+        </div>
+    </div>
+</div>
+
+{% if cameras %}
+<div class="row">
+    {% for camera in cameras %}
+    <div class="col-md-6 col-lg-4 mb-4">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0">
+                    {% if camera.enabled %}
+                        {% if camera.last_ping_status == 'up' %}
+                            <span class="status-indicator status-online"></span>
+                        {% elif camera.last_ping_status == 'down' %}
+                            <span class="status-indicator status-offline"></span>
+                        {% else %}
+                            <span class="status-indicator status-unknown"></span>
+                        {% endif %}
+                    {% else %}
+                        <span class="status-indicator status-unknown"></span>
+                    {% endif %}
+                    {{ camera.name or 'Camera ' + camera.id }}
+                </h6>
+                <span class="badge {{ 'bg-success' if camera.enabled else 'bg-secondary' }}">
+                    {{ 'Enabled' if camera.enabled else 'Disabled' }}
+                </span>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-6">
+                        <small class="text-muted">ONVIF IP</small>
+                        <div class="fw-bold">{{ camera.onvif_ip }}</div>
+                    </div>
+                    <div class="col-6">
+                        <small class="text-muted">Port</small>
+                        <div class="fw-bold">{{ camera.onvif_port }}</div>
+                    </div>
+                </div>
+                <div class="row mt-2">
+                    <div class="col-6">
+                        <small class="text-muted">MAC Address</small>
+                        <div class="fw-bold small">{{ camera.mac_address }}</div>
+                    </div>
+                    <div class="col-6">
+                        <small class="text-muted">Last Ping</small>
+                        <div class="fw-bold">{{ camera.last_ping_status.title() }}</div>
+                    </div>
+                </div>
+                {% if camera.rtsp_url %}
+                <div class="mt-2">
+                    <small class="text-muted">RTSP URL</small>
+                    <div class="small text-truncate">{{ camera.rtsp_url }}</div>
+                </div>
+                {% endif %}
+            </div>
+            <div class="card-footer">
+                <div class="btn-group w-100 mb-2" role="group">
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="testCamera('{{ camera.id }}')">
+                        <i class="fas fa-network-wired"></i> Test
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-success" onclick="openStreamModal('{{ camera.id }}')">
+                        <i class="fas fa-video"></i> View
+                    </button>
+                    <button type="button" class="btn btn-sm {{ 'btn-outline-warning' if camera.enabled else 'btn-outline-success' }}" 
+                            onclick="toggleCamera('{{ camera.id }}', {{ 'false' if camera.enabled else 'true' }})">
+                        <i class="fas {{ 'fa-pause' if camera.enabled else 'fa-play' }}"></i> {{ 'Disable' if camera.enabled else 'Enable' }}
+                    </button>
+                    <a href="{{ url_for('edit_camera', camera_id=camera.id) }}" class="btn btn-sm btn-outline-secondary">
+                        <i class="fas fa-edit"></i> Edit
+                    </a>
+                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteCamera('{{ camera.id }}', '{{ camera.name or 'Camera ' + camera.id }}')">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="text-center py-5">
+    <i class="fas fa-camera fa-4x text-muted mb-4"></i>
+    <h3 class="text-muted">No cameras configured</h3>
+    <p class="text-muted mb-4">Add your first camera to start proxying RTSP streams to ONVIF</p>
+    <a href="{{ url_for('add_camera') }}" class="btn btn-primary btn-lg">
+        <i class="fas fa-plus"></i> Add Your First Camera
+    </a>
+</div>
+{% endif %}
+
+<!-- Delete Confirmation Modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm Delete</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete <strong id="deleteCameraName"></strong>?</p>
+                <p class="text-muted">This will remove the camera configuration and stop its ONVIF proxy service.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form id="deleteForm" method="POST" style="display: inline;">
+                    <button type="submit" class="btn btn-danger">Delete Camera</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Live Stream Modal -->
+<div class="modal fade" id="streamModal" tabindex="-1" aria-labelledby="streamModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="streamModalLabel">
+                    <i class="fas fa-video"></i> Live Camera Stream
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="stream-container bg-dark rounded d-flex align-items-center justify-content-center" style="min-height: 400px;">
+                            <div id="stream-loading" class="text-center text-light">
+                                <div class="spinner-border" role="status">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                                <div class="mt-2">Connecting to camera stream...</div>
+                            </div>
+                            <img id="stream-image" class="img-fluid rounded" style="display: none; max-height: 400px;" alt="Camera Stream">
+                            <div id="stream-error" class="text-center text-danger" style="display: none;">
+                                <i class="fas fa-exclamation-triangle fa-3x mb-3"></i>
+                                <div>Failed to load camera stream</div>
+                                <small id="stream-error-message"></small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0"><i class="fas fa-info-circle"></i> Stream Information</h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-2">
+                                    <small class="text-muted">Camera Name:</small><br>
+                                    <strong id="stream-camera-name">-</strong>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">RTSP URL:</small><br>
+                                    <code id="stream-rtsp-url" class="small">-</code>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">Status:</small><br>
+                                    <span id="stream-status" class="badge bg-secondary">Connecting</span>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">Resolution:</small><br>
+                                    <span id="stream-resolution">-</span>
+                                </div>
+                                <div class="mb-2">
+                                    <small class="text-muted">Frame Rate:</small><br>
+                                    <span id="stream-fps">-</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card mt-3">
+                            <div class="card-header">
+                                <h6 class="mb-0"><i class="fas fa-network-wired"></i> Connection Test</h6>
+                            </div>
+                            <div class="card-body">
+                                <button type="button" class="btn btn-outline-primary btn-sm w-100" onclick="testCameraConnection()">
+                                    <i class="fas fa-satellite-dish"></i> Test Network Connection
+                                </button>
+                                <div id="connection-test-result" class="mt-2"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    <i class="fas fa-times"></i> Close
+                </button>
+                <button type="button" class="btn btn-primary" onclick="refreshStream()">
+                    <i class="fas fa-refresh"></i> Refresh Stream
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentCameraId = null;
+let streamModal = null;
+
+function testCamera(cameraId) {
+    const button = event.target.closest('button');
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing...';
+    button.disabled = true;
+    
+    fetch(`/camera/${cameraId}/test`)
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const pingResults = data.ping_results;
+            showAlert('success', `Camera test successful! Packet loss: ${pingResults.packet_loss}, Avg time: ${pingResults.avg_time}`);
+        } else {
+            showAlert('danger', 'Camera test failed: ' + data.error);
+        }
+    })
+    .catch(error => {
+        showAlert('danger', 'Test error: ' + error.message);
+    })
+    .finally(() => {
+        button.innerHTML = originalText;
+        button.disabled = false;
+    });
+}
+
+function deleteCamera(cameraId, cameraName) {
+    document.getElementById('deleteCameraName').textContent = cameraName;
+    document.getElementById('deleteForm').action = `/camera/${cameraId}/delete`;
+    
+    const modal = new bootstrap.Modal(document.getElementById('deleteModal'));
+    modal.show();
+}
+
+function toggleCamera(cameraId, enable) {
+    const button = event.target.closest('button');
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Updating...';
+    button.disabled = true;
+    
+    fetch(`/api/camera/${cameraId}/toggle`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ enabled: enable })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Reload the page to update the camera status
+            location.reload();
+        } else {
+            showAlert('danger', 'Failed to update camera: ' + data.error);
+            button.innerHTML = originalText;
+            button.disabled = false;
+        }
+    })
+    .catch(error => {
+        showAlert('danger', 'Error updating camera: ' + error.message);
+        button.innerHTML = originalText;
+        button.disabled = false;
+    });
+}
+
+function openStreamModal(cameraId) {
+    currentCameraId = cameraId;
+    
+    // Reset modal state
+    document.getElementById('stream-loading').style.display = 'block';
+    document.getElementById('stream-image').style.display = 'none';
+    document.getElementById('stream-error').style.display = 'none';
+    document.getElementById('stream-status').textContent = 'Connecting';
+    document.getElementById('stream-status').className = 'badge bg-secondary';
+    
+    // Clear previous stream info
+    document.getElementById('stream-camera-name').textContent = '-';
+    document.getElementById('stream-rtsp-url').textContent = '-';
+    document.getElementById('stream-resolution').textContent = '-';
+    document.getElementById('stream-fps').textContent = '-';
+    document.getElementById('connection-test-result').innerHTML = '';
+    
+    // Show modal
+    streamModal = new bootstrap.Modal(document.getElementById('streamModal'));
+    streamModal.show();
+    
+    // Start stream
+    startStream(cameraId);
+}
+
+function startStream(cameraId) {
+    // Fetch camera info first
+    fetch(`/api/camera/${cameraId}/info`)
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            document.getElementById('stream-camera-name').textContent = data.camera.name || `Camera ${cameraId}`;
+            document.getElementById('stream-rtsp-url').textContent = data.camera.rtsp_url || 'Not configured';
+        }
+    })
+    .catch(error => {
+        console.log('Failed to fetch camera info:', error);
+    });
+    
+    // Start MJPEG stream
+    const streamImg = document.getElementById('stream-image');
+    const streamUrl = `/camera/${cameraId}/mjpeg`;
+    
+    streamImg.onload = function() {
+        document.getElementById('stream-loading').style.display = 'none';
+        document.getElementById('stream-error').style.display = 'none';
+        document.getElementById('stream-image').style.display = 'block';
+        document.getElementById('stream-status').textContent = 'Connected';
+        document.getElementById('stream-status').className = 'badge bg-success';
+        
+        // Update stream info
+        document.getElementById('stream-resolution').textContent = `${this.naturalWidth}x${this.naturalHeight}`;
+        document.getElementById('stream-fps').textContent = '~15 FPS';
+    };
+    
+    streamImg.onerror = function() {
+        document.getElementById('stream-loading').style.display = 'none';
+        document.getElementById('stream-image').style.display = 'none';
+        document.getElementById('stream-error').style.display = 'block';
+        document.getElementById('stream-status').textContent = 'Failed';
+        document.getElementById('stream-status').className = 'badge bg-danger';
+        document.getElementById('stream-error-message').textContent = 'Unable to connect to camera stream';
+    };
+    
+    streamImg.src = streamUrl + '?t=' + Date.now();
+}
+
+function refreshStream() {
+    if (currentCameraId) {
+        document.getElementById('stream-loading').style.display = 'block';
+        document.getElementById('stream-image').style.display = 'none';
+        document.getElementById('stream-error').style.display = 'none';
+        startStream(currentCameraId);
+    }
+}
+
+function testCameraConnection() {
+    if (!currentCameraId) return;
+    
+    const resultDiv = document.getElementById('connection-test-result');
+    resultDiv.innerHTML = '<div class="spinner-border spinner-border-sm" role="status"></div> Testing connection...';
+    
+    fetch(`/camera/${currentCameraId}/test`)
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const pingResults = data.ping_results;
+            resultDiv.innerHTML = `
+                <div class="alert alert-success alert-sm mb-0">
+                    <i class="fas fa-check-circle"></i> Connection successful<br>
+                    <small>Packet loss: ${pingResults.packet_loss} | Avg time: ${pingResults.avg_time}</small>
+                </div>
+            `;
+        } else {
+            resultDiv.innerHTML = `
+                <div class="alert alert-danger alert-sm mb-0">
+                    <i class="fas fa-exclamation-triangle"></i> Connection failed<br>
+                    <small>${data.error}</small>
+                </div>
+            `;
+        }
+    })
+    .catch(error => {
+        resultDiv.innerHTML = `
+            <div class="alert alert-danger alert-sm mb-0">
+                <i class="fas fa-exclamation-triangle"></i> Test error<br>
+                <small>${error.message}</small>
+            </div>
+        `;
+    });
+}
+
+// Clean up when modal is closed
+document.addEventListener('DOMContentLoaded', function() {
+    const modalElement = document.getElementById('streamModal');
+    if (modalElement) {
+        modalElement.addEventListener('hidden.bs.modal', function () {
+            const streamImg = document.getElementById('stream-image');
+            if (streamImg) {
+                streamImg.src = '';
+            }
+            currentCameraId = null;
+        });
+    }
+});
+</script>
+{% endblock %}

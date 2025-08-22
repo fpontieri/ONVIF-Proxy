@@ -1,0 +1,27 @@
+[Unit]
+Description=ONVIF Proxy Web Interface
+Documentation=https://github.com/your-repo/onvif-proxy
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/onvif-proxy
+ExecStart=/usr/bin/gunicorn --config /opt/onvif-proxy/gunicorn.conf.py src.web_interface:app
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=onvif-proxy-web
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/onvif-proxy /var/log /var/lib/onvif-proxy /run/onvif-proxy
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

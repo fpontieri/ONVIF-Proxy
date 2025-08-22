@@ -1,0 +1,27 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<onvif_proxy>
+    <system>
+        <enabled>True</enabled>
+        <base_interface>enp0s5</base_interface>
+        <base_ip_range>192.168.255.100</base_ip_range>
+        <pushover_token />
+        <pushover_user />
+        <web_port>8080</web_port>
+    </system>
+    <cameras>
+        <camera id="1">
+            <name>Garagem</name>
+            <enabled>True</enabled>
+            <base_interface>enp0s5</base_interface>
+            <use_dhcp>True</use_dhcp>
+            <rtsp_url>rtsp://Rc0wuSJ5mYtIVGIg:Ah6kH0r40EGcaSP2@172.16.0.40/live0</rtsp_url>
+            <rtsp_username>None</rtsp_username>
+            <rtsp_password>None</rtsp_password>
+            <onvif_ip />
+            <onvif_port>80</onvif_port>
+            <mac_address>02:00:00:00:00:01</mac_address>
+            <notifications_enabled>False</notifications_enabled>
+            <last_ping_status>unknown</last_ping_status>
+        </camera>
+    </cameras>
+</onvif_proxy>
