@@ -58,7 +58,7 @@ wsgi_module = "src.web_interface:app"
 
 # Environment variables
 raw_env = [
-    "FLASK_ENV=production",
+    "FLASK_DEBUG=0",
     "PYTHONPATH=/opt/onvif-proxy"
 ]
 

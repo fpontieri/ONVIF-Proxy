@@ -1,6 +1,6 @@
 [Unit]
 Description=ONVIF Proxy Service
-Documentation=https://github.com/your-repo/onvif-proxy
+Documentation=https://github.com/fpontieri/ONVIF-Proxy
 After=network.target network-online.target
 Wants=network-online.target
 Requires=systemd-networkd.service
@@ -29,8 +29,8 @@ ProtectKernelModules=false
 ProtectControlGroups=false
 
 # Network capabilities
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_DAC_OVERRIDE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target

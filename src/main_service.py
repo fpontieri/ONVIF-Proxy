@@ -13,6 +13,7 @@ import sys
 import time
 import threading
 from typing import Dict, List
+from urllib.parse import urlparse
 from config_manager import ConfigManager
 from network_manager import NetworkManager
 from notification_manager import NotificationManager
@@ -43,12 +44,21 @@ class ONVIFProxyService:
         # Setup signal handlers
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGHUP, self._reload_handler)
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""
         self.logger.info(f"Received signal {signum}, shutting down...")
         self.stop()
         sys.exit(0)
+    
+    def _reload_handler(self, signum, frame):
+        """Handle reload signal (SIGHUP)"""
+        self.logger.info(f"Received signal {signum}, reloading configuration...")
+        try:
+            self.reload_configuration()
+        except Exception as e:
+            self.logger.error(f"Failed to reload configuration: {e}")
     
     def start(self):
         """Start the ONVIF proxy service"""
@@ -154,19 +164,83 @@ class ONVIFProxyService:
             camera_config['onvif_mac'] = mac_address
             self.config_manager.update_camera(camera_id, camera_config)
         
-        # Always use static IP configuration - no DHCP
+        # Handle DHCP vs static IP configuration
+        use_dhcp = camera_config.get('use_dhcp', False)
+        
+        if use_dhcp:
+            self.logger.info(f"Camera {camera_id} configured for DHCP, creating interface without static IP")
+            # For DHCP cameras, create interface first then acquire IP via DHCP
+            interface_name = f"onvif-{camera_id}"
+            
+            # Create interface without IP first
+            if not self.network_manager.create_camera_interface(base_interface, str(camera_id), mac_address, None):
+                self.logger.error(f"Failed to create network interface for camera {camera_id}")
+                return False
+            
+            # Now acquire DHCP IP on the interface
+            self.logger.info(f"Acquiring DHCP IP for interface {interface_name}")
+            camera_name = camera_config.get('name', f'camera{camera_id}')
+            dhcp_ip = self.network_manager.acquire_dhcp(interface_name, camera_name=camera_name)
+            if dhcp_ip:
+                self.logger.info(f"Acquired DHCP IP {dhcp_ip} for camera {camera_id}")
+                onvif_ip = dhcp_ip
+                # Update camera config with DHCP-acquired IP
+                camera_config['onvif_ip'] = onvif_ip
+                self.config_manager.update_camera(camera_id, camera_config)
+
+                # Create NAT rules now that virtual interface has an IP
+                rtsp_url = camera_config.get('rtsp_url', '')
+                camera_ip = urlparse(rtsp_url).hostname if rtsp_url else None
+                if camera_ip:
+                    try:
+                        self.logger.info(f"Creating RTSP NAT rules {onvif_ip}:554 -> {camera_ip}:554 for camera {camera_id}")
+                        self.network_manager.create_rtsp_nat_rules(onvif_ip, camera_ip)
+                    except Exception as e:
+                        self.logger.error(f"Failed to create NAT rules for camera {camera_id}: {e}")
+            else:
+                self.logger.error(f"DHCP failed for camera {camera_id} - this is a fatal error")
+                
+                # Send notification about DHCP failure
+                system_config = self.config_manager.get_system_config()
+                if system_config.get('pushover_token') and system_config.get('pushover_user'):
+                    error_msg = f"🚨 DHCP Failed for Camera {camera_config.get('name', camera_id)}\n\n"
+                    error_msg += f"Interface: {interface_name}\n"
+                    error_msg += f"Camera ID: {camera_id}\n"
+                    error_msg += f"MAC: {mac_address}\n\n"
+                    error_msg += "Check dhclient permissions for onvif-proxy user.\n"
+                    error_msg += "DHCP server may not be available on virtual interface network."
+                    
+                    self.notification_manager.send_notification(
+                        "ONVIF Proxy - DHCP Failure",
+                        error_msg,
+                        priority=2  # High priority
+                    )
+                
+                return False
+            
+            # Make network configuration persistent
+            try:
+                self.network_manager.make_persistent_config(base_interface, camera_id, onvif_ip, mac_address)
+                self.logger.info(f"Camera {camera_id} network interface created with DHCP IP {onvif_ip}")
+            except Exception as e:
+                self.logger.warning(f"Failed to make network config persistent for camera {camera_id}: {e}")
+            
+            return True
+        
         if not onvif_ip:
             self.logger.warning(f"No ONVIF IP configured for camera {camera_id}, skipping network setup")
             return True  # Not an error, just no network interface needed
         
-        # Create camera interface with static IP
-        if not self.network_manager.create_camera_interface(base_interface, str(camera_id), mac_address, onvif_ip):
+        # Create camera interface with static IP (and setup NAT inside when camera IP is provided)
+        rtsp_url = camera_config.get('rtsp_url', '')
+        camera_ip = urlparse(rtsp_url).hostname if rtsp_url else None
+        if not self.network_manager.create_camera_interface(base_interface, str(camera_id), mac_address, onvif_ip, camera_ip):
             self.logger.error(f"Failed to create network interface for camera {camera_id}")
             return False
         
         # Make network configuration persistent
         try:
-            self.network_manager.make_persistent(f"onvif-{camera_id}", onvif_ip, mac_address)
+            self.network_manager.make_persistent_config(base_interface, camera_id, onvif_ip, mac_address)
             self.logger.info(f"Camera {camera_id} network interface created with IP {onvif_ip}")
         except Exception as e:
             self.logger.warning(f"Failed to make network config persistent for camera {camera_id}: {e}")
@@ -178,17 +252,20 @@ class ONVIFProxyService:
         cameras = self.config_manager.get_cameras()
         for camera in cameras:
             camera_id = camera['id']
-            # Remove camera interface
-            self.network_manager.remove_camera_interface(camera_id)
-            # Remove persistent config if IP exists
+            # Remove camera interface and NAT rules if we have IP info
             onvif_ip = camera.get('onvif_ip')
+            rtsp_url = camera.get('rtsp_url', '')
+            camera_ip = urlparse(rtsp_url).hostname if rtsp_url else None
+            self.network_manager.remove_camera_interface(camera_id, onvif_ip, camera_ip)
+            # Remove persistent config if IP exists
             if onvif_ip:
-                self.network_manager.remove_persistent_config(onvif_ip)
+                self.network_manager.remove_persistent_config(camera_id)
     
     def _on_stream_status_change(self, camera_config: Dict, is_available: bool):
         """Handle stream status changes"""
         camera_name = camera_config.get('name', f"Camera {camera_config['id']}")
-        camera_ip = camera_config.get('rtsp_url', '').split('//')[1].split(':')[0] if '://' in camera_config.get('rtsp_url', '') else 'unknown'
+        rtsp_url = camera_config.get('rtsp_url', '')
+        camera_ip = urlparse(rtsp_url).hostname if rtsp_url else 'unknown'
         
         if not camera_config.get('notifications_enabled', True):
             return
@@ -272,13 +349,11 @@ class ONVIFProxyService:
                 try:
                     prev_config = self.proxy_servers[camera_id].camera_config
                     default_interface = system_config.get('base_interface', 'eth0')
-                    if prev_config.get('use_dhcp', False):
-                        self.network_manager.remove_camera_interface(camera_id)
-                    else:
-                        base_interface = prev_config.get('base_interface') or default_interface
-                        onvif_ip = prev_config.get('onvif_ip')
-                        if onvif_ip:
-                            self.network_manager.remove_ip_alias(base_interface, onvif_ip)
+                    # Remove interface and NAT rules irrespective of DHCP/static
+                    onvif_ip = prev_config.get('onvif_ip')
+                    rtsp_url = prev_config.get('rtsp_url', '')
+                    camera_ip = urlparse(rtsp_url).hostname if rtsp_url else None
+                    self.network_manager.remove_camera_interface(camera_id, onvif_ip, camera_ip)
                 except Exception as e:
                     self.logger.warning(f"Failed to cleanup network for camera {camera_id} on reload: {e}")
                 self.proxy_servers[camera_id].stop()

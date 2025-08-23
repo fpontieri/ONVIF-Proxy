@@ -32,7 +32,7 @@
                     {% else %}
                         <span class="status-indicator status-unknown"></span>
                     {% endif %}
-                    {{ camera.name or 'Camera ' + camera.id }}
+                    {{ camera.name or ('Camera ' ~ camera.id) }}
                 </h6>
                 <span class="badge {{ 'bg-success' if camera.enabled else 'bg-secondary' }}">
                     {{ 'Enabled' if camera.enabled else 'Disabled' }}
@@ -52,7 +52,7 @@
                 <div class="row mt-2">
                     <div class="col-6">
                         <small class="text-muted">MAC Address</small>
-                        <div class="fw-bold small">{{ camera.mac_address }}</div>
+                        <div class="fw-bold small">{{ camera.onvif_mac }}</div>
                     </div>
                     <div class="col-6">
                         <small class="text-muted">Last Ping</small>
@@ -74,14 +74,22 @@
                     <button type="button" class="btn btn-sm btn-outline-success" onclick="openStreamModal('{{ camera.id }}')">
                         <i class="fas fa-video"></i> View
                     </button>
+                    <a href="{{ url_for('camera_traffic', camera_id=camera.id) }}" class="btn btn-sm btn-outline-info">
+                        <i class="fas fa-chart-line"></i> Traffic
+                    </a>
+                </div>
+                <div class="btn-group w-100" role="group">
                     <button type="button" class="btn btn-sm {{ 'btn-outline-warning' if camera.enabled else 'btn-outline-success' }}" 
-                            onclick="toggleCamera('{{ camera.id }}', {{ 'false' if camera.enabled else 'true' }})">
+                            data-id="{{ camera.id }}" data-enable="{{ 'true' if not camera.enabled else 'false' }}"
+                            onclick="toggleCamera(this.dataset.id, this.dataset.enable === 'true')">
                         <i class="fas {{ 'fa-pause' if camera.enabled else 'fa-play' }}"></i> {{ 'Disable' if camera.enabled else 'Enable' }}
                     </button>
                     <a href="{{ url_for('edit_camera', camera_id=camera.id) }}" class="btn btn-sm btn-outline-secondary">
                         <i class="fas fa-edit"></i> Edit
                     </a>
-                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteCamera('{{ camera.id }}', '{{ camera.name or 'Camera ' + camera.id }}')">
+                    <button type="button" class="btn btn-sm btn-outline-danger" 
+                            data-id="{{ camera.id }}" data-name="{{ (camera.name or ('Camera ' ~ camera.id))|e }}"
+                            onclick="deleteCamera(this.dataset.id, this.dataset.name)">
                         <i class="fas fa-trash"></i> Delete
                     </button>
                 </div>

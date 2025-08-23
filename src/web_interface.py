@@ -5,6 +5,7 @@ Flask-based web application for camera configuration and monitoring
 """
 
 import os
+import tempfile
 import re
 import time
 import json
@@ -12,19 +13,21 @@ import subprocess
 import threading
 import signal
 import logging
-from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, Response, send_from_directory
+from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, Response, send_from_directory, make_response
 from functools import wraps
 import json
 from src.config_manager import ConfigManager
 from src.network_manager import NetworkManager
 from src.notification_manager import NotificationManager
+from src.traffic_monitor import TrafficMonitor
 from urllib.parse import urlparse
 
 app = Flask(__name__)
+app.version = "v2.0.37 - 2025-08-23 02:22:27 - Clean up iptables debug logs"
 app.secret_key = os.urandom(24)
 
 # Hardcoded app version (increment on each change) with timestamp
-APP_VERSION = "2.5.9 - 2025-08-22 01:44:19+02:00"  # Fixed virtual interface creation with automatic MAC address generation based on camera ID
+APP_VERSION = app.version
 
 @app.context_processor
 def inject_app_version():
@@ -34,10 +37,144 @@ def inject_app_version():
 config_manager = ConfigManager()
 network_manager = NetworkManager()
 notification_manager = NotificationManager()
+traffic_monitor = TrafficMonitor()
+
+# Lightweight cache for traffic rates computed on-demand in the web process
+# Structure: { camera_id: { 'timestamp': float, 'rx_bytes': int, 'tx_bytes': int,
+#                           'rx_packets': int, 'tx_packets': int } }
+traffic_last_stats = {}
+
+# Ensure we always read the latest config from disk for read-only routes
+def ensure_fresh_config():
+    try:
+        config_manager.reload_config()
+    except Exception as e:
+        app.logger.warning(f"[CONFIG] Failed to reload config on read: {e}")
+
+def _extract_camera_ip(rtsp_url: str) -> str:
+    """Extract camera host/IP from an RTSP URL."""
+    try:
+        p = urlparse(rtsp_url)
+        return p.hostname
+    except Exception:
+        return None
+
+def _get_iptables_counters(virtual_ip: str, camera_ip: str):
+    """Read traffic counters for the camera.
+    Priority 1: filter table TRAFFIC_ACCT chain (accounting rules by src/dst IP).
+    Fallback: NAT table DNAT/SNAT counters.
+    Returns tuple: (rx_bytes, tx_bytes, rx_packets, tx_packets) or None on error.
+    """
+    try:
+        rx_bytes = rx_packets = tx_bytes = tx_packets = 0
+
+        # First try TRAFFIC_ACCT via iptables-save -c (has counters)
+        ipt_save_paths = ['/usr/sbin/iptables-save', '/sbin/iptables-save']
+        acct_found = False
+        for ipts in ipt_save_paths:
+            cmd = ['/usr/bin/sudo', '-n', ipts, '-c', '-t', 'filter']
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                out = res.stdout
+                # Lines look like: [packets:bytes] -A TRAFFIC_ACCT -s 192.168.1.10/32 -j RETURN
+                for line in out.splitlines():
+                    if ' -A TRAFFIC_ACCT ' not in line:
+                        continue
+                    # packets:bytes prefix
+                    if not line.startswith('[') or ']' not in line:
+                        continue
+                    try:
+                        bracket = line[1:line.index(']')]
+                        pkts_str, bytes_str = bracket.split(':', 1)
+                        pkts = int(pkts_str)
+                        byts = int(bytes_str)
+                    except Exception:
+                        continue
+                    # Source vs destination rule match
+                    if f"-s {camera_ip}" in line:
+                        tx_packets += pkts
+                        tx_bytes += byts
+                        acct_found = True
+                    if f"-d {camera_ip}" in line:
+                        rx_packets += pkts
+                        rx_bytes += byts
+                        acct_found = True
+                if acct_found:
+                    app.logger.debug(f"[TRAFFIC][WEB][ACCT] Counters via TRAFFIC_ACCT for {camera_ip}: rx_b={rx_bytes}, tx_b={tx_bytes}")
+                    return rx_bytes, tx_bytes, rx_packets, tx_packets
+            else:
+                app.logger.debug(f"[TRAFFIC][WEB][ACCT] iptables-save failed with {ipts}: rc={res.returncode}, err={res.stderr.strip()}")
+
+        # Fallback: Prefer absolute paths and non-interactive sudo to work under systemd (NAT counters)
+        iptables_paths = ['/usr/sbin/iptables', '/sbin/iptables']
+
+        dnat_out = None
+        dnat_path_used = None
+        for ipt in iptables_paths:
+            dnat_cmd = ['/usr/bin/sudo', '-n', ipt, '-t', 'nat', '-L', 'PREROUTING', '-n', '-v', '-x']
+            res = subprocess.run(dnat_cmd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                dnat_out = res.stdout
+                dnat_path_used = ipt
+                break
+            else:
+                app.logger.info(f"[TRAFFIC][WEB] DNAT iptables failed with {ipt}: rc={res.returncode}, err={res.stderr.strip()}")
+
+        matched_dnat = 0
+        if dnat_out:
+            app.logger.debug(f"[TRAFFIC][WEB] Using iptables at {dnat_path_used} for DNAT")
+            for line in dnat_out.splitlines():
+                # Sum all DNAT rules involving this camera's virtual IP (any ports)
+                if 'DNAT' in line and virtual_ip in line:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                        rx_packets += int(parts[0])
+                        rx_bytes += int(parts[1])
+                        matched_dnat += 1
+        else:
+            app.logger.debug("[TRAFFIC][WEB] DNAT listing produced no output")
+
+        snat_out = None
+        snat_path_used = None
+        for ipt in iptables_paths:
+            snat_cmd = ['/usr/bin/sudo', '-n', ipt, '-t', 'nat', '-L', 'POSTROUTING', '-n', '-v', '-x']
+            res = subprocess.run(snat_cmd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                snat_out = res.stdout
+                snat_path_used = ipt
+                break
+            else:
+                app.logger.info(f"[TRAFFIC][WEB] SNAT iptables failed with {ipt}: rc={res.returncode}, err={res.stderr.strip()}")
+
+        matched_snat = 0
+        if snat_out:
+            app.logger.debug(f"[TRAFFIC][WEB] Using iptables at {snat_path_used} for SNAT")
+            for line in snat_out.splitlines():
+                # Sum all egress NAT rules involving this camera's real IP (SNAT or MASQUERADE)
+                if (("SNAT" in line) or ("MASQUERADE" in line)) and (camera_ip in line):
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                        tx_packets += int(parts[0])
+                        tx_bytes += int(parts[1])
+                        matched_snat += 1
+        else:
+            app.logger.debug("[TRAFFIC][WEB] SNAT listing produced no output")
+
+        # If both outputs were missing, treat as error so UI can report it
+        if dnat_out is None and snat_out is None:
+            return None
+
+        app.logger.debug(f"[TRAFFIC][WEB] vip={virtual_ip} cam_ip={camera_ip} DNAT_matches={matched_dnat} SNAT_matches={matched_snat} rx_b={rx_bytes} tx_b={tx_bytes} rx_p={rx_packets} tx_p={tx_packets}")
+
+        return rx_bytes, tx_bytes, rx_packets, tx_packets
+    except Exception as e:
+        app.logger.error(f"[TRAFFIC] Failed reading iptables counters {virtual_ip}->{camera_ip}: {e}")
+        return None
 
 @app.route('/')
 def index():
     """Main dashboard"""
+    ensure_fresh_config()
     system_config = config_manager.get_system_config()
     cameras = config_manager.get_cameras()
     
@@ -57,7 +194,31 @@ def index():
 @app.route('/cameras')
 def cameras():
     """Camera management page"""
+    ensure_fresh_config()
     cameras = config_manager.get_cameras()
+    
+    # Enrich camera data with runtime information
+    for camera in cameras:
+        camera_id = camera['id']
+        interface_name = f"onvif-{camera_id}"
+        
+        # Get ONVIF IP from interface if available
+        if not camera.get('onvif_ip'):
+            onvif_ip = network_manager.get_interface_ipv4(interface_name)
+            if onvif_ip:
+                camera['onvif_ip'] = onvif_ip
+        
+        # Ensure onvif_mac is populated
+        if not camera.get('onvif_mac'):
+            try:
+                camera['onvif_mac'] = config_manager.generate_mac_for_camera_id(int(camera_id))
+            except Exception:
+                camera['onvif_mac'] = ''
+        
+        # Set default ping status if not present
+        if not camera.get('last_ping_status'):
+            camera['last_ping_status'] = 'unknown'
+    
     return render_template('cameras.html', cameras=cameras)
 
 @app.route('/camera/add', methods=['GET', 'POST'])
@@ -75,8 +236,8 @@ def add_camera():
             'rtsp_username': request.form.get('rtsp_username', ''),
             'rtsp_password': request.form.get('rtsp_password', ''),
             'resolution': request.form.get('resolution', '1280x720'),
-            'fps': int(request.form.get('fps', 15)) if request.form.get('fps') else 15,
-            'bitrate_kbps': request.form.get('bitrate_kbps') or None,
+            'fps': int(float(request.form.get('fps', 15))) if request.form.get('fps') else 15,
+            'bitrate_kbps': int(float(request.form.get('bitrate_kbps', 0))) if request.form.get('bitrate_kbps') else None,
             'onvif_ip': request.form.get('onvif_ip', ''),
             'onvif_port': int(request.form.get('onvif_port', 80)),
             'onvif_mac': request.form.get('mac_address', '') or config_manager.generate_mac_for_camera_id(camera_id),  # Store as onvif_mac
@@ -84,7 +245,24 @@ def add_camera():
             'notifications_enabled': request.form.get('notifications_enabled') == 'on'
         }
         
-        if config_manager.add_camera(camera_config):
+        # Add camera to config
+        try:
+            ok = config_manager.add_camera(camera_config)
+        except Exception as e:
+            flash(f'Failed to save configuration: {str(e)}', 'error')
+            # Emergency alert
+            try:
+                notification_manager.notify_fatal_error(f"Config write failure while adding camera {camera_config.get('name','')} (ID {camera_id}): {e}")
+            except Exception:
+                pass
+            return redirect(url_for('cameras'))
+
+        if ok:
+            # Reload config so front-end immediately sees the new camera
+            try:
+                config_manager.reload_config()
+            except Exception as e:
+                app.logger.warning(f"[CONFIG] Reload after add failed: {e}")
             flash('Camera added successfully!', 'success')
             # Reload service configuration via systemd
             try:
@@ -92,6 +270,8 @@ def add_camera():
                              capture_output=True, text=True, timeout=10)
             except:
                 pass  # Service reload is best effort
+            
+            return redirect(url_for('cameras'))
         else:
             flash('Failed to add camera. Camera ID might already exist.', 'error')
         
@@ -130,8 +310,8 @@ def edit_camera(camera_id):
             'rtsp_username': request.form.get('rtsp_username', ''),
             'rtsp_password': request.form.get('rtsp_password', ''),
             'resolution': request.form.get('resolution', ''),
-            'fps': int(request.form.get('fps', 0)) if request.form.get('fps') else None,
-            'bitrate_kbps': int(request.form.get('bitrate_kbps', 0)) if request.form.get('bitrate_kbps') else None,
+            'fps': int(float(request.form.get('fps', 0))) if request.form.get('fps') else None,
+            'bitrate_kbps': int(float(request.form.get('bitrate_kbps', 0))) if request.form.get('bitrate_kbps') else None,
             'onvif_ip': request.form.get('onvif_ip', ''),
             'onvif_port': int(request.form.get('onvif_port', 80)),
             'onvif_mac': request.form.get('mac_address', '') or config_manager.generate_mac_for_camera_id(int(camera_id)),  # Store as onvif_mac
@@ -142,7 +322,22 @@ def edit_camera(camera_id):
         # Debug logging
         app.logger.info(f"[CAMERA_EDIT] Updating camera {camera_id} with config: {camera_config}")
         
-        if config_manager.update_camera(camera_id, camera_config):
+        try:
+            ok = config_manager.update_camera(camera_id, camera_config)
+        except Exception as e:
+            flash(f'Failed to save configuration: {str(e)}', 'error')
+            try:
+                notification_manager.notify_fatal_error(f"Config write failure while editing camera {camera_id}: {e}")
+            except Exception:
+                pass
+            return redirect(url_for('cameras'))
+
+        if ok:
+            # Reload config so front-end immediately reflects edits
+            try:
+                config_manager.reload_config()
+            except Exception as e:
+                app.logger.warning(f"[CONFIG] Reload after edit failed: {e}")
             flash('Camera updated successfully!', 'success')
             # Reload service configuration via systemd
             try:
@@ -171,7 +366,22 @@ def delete_camera(camera_id):
     camera = config_manager.get_camera(camera_id)
     camera_name = camera.get('name', f'ID {camera_id}') if camera else f'ID {camera_id}'
     
-    if config_manager.delete_camera(camera_id):
+    try:
+        ok = config_manager.delete_camera(camera_id)
+    except Exception as e:
+        flash(f'Failed to save configuration: {str(e)}', 'error')
+        try:
+            notification_manager.notify_fatal_error(f"Config write failure while deleting camera {camera_name} (ID {camera_id}): {e}")
+        except Exception:
+            pass
+        return redirect(url_for('cameras'))
+
+    if ok:
+        # Reload config so front-end immediately reflects deletion
+        try:
+            config_manager.reload_config()
+        except Exception as e:
+            app.logger.warning(f"[CONFIG] Reload after delete failed: {e}")
         # Remove network interface if it exists
         try:
             network_manager.remove_camera_interface(camera_id)
@@ -736,7 +946,7 @@ def camera_info(camera_id):
                 'onvif_ip': camera.get('onvif_ip', ''),
                 'onvif_port': camera.get('onvif_port', 80),
                 'enabled': camera.get('enabled', False),
-                'mac_address': camera.get('mac_address', ''),
+                'onvif_mac': camera.get('onvif_mac', ''),
                 'use_dhcp': camera.get('use_dhcp', False),
                 'last_ping_status': camera.get('last_ping_status', 'unknown'),
                 'resolution': resolution,
@@ -819,13 +1029,28 @@ def toggle_camera(camera_id):
         camera_config['enabled'] = data['enabled']
         
         if config_manager.update_camera(camera_id, camera_config):
-            # Reload service configuration via systemd
+            # Send SIGHUP to reload configuration in the main service
             try:
-                subprocess.run(['sudo', 'systemctl', 'reload-or-restart', 'onvif-proxy'], 
+                subprocess.run(['sudo', 'systemctl', 'reload', 'onvif-proxy'], 
                              capture_output=True, text=True, timeout=10)
             except:
                 pass  # Service reload is best effort
             
+            # Reload config so front-end immediately reflects toggle state
+            try:
+                config_manager.reload_config()
+            except Exception as e:
+                app.logger.warning(f"[CONFIG] Reload after toggle failed: {e}")
+
+            # Update network interface based on enabled status
+            try:
+                if data['enabled']:
+                    network_manager.ensure_camera_interface(camera_id, camera_config)
+                else:
+                    network_manager.remove_camera_interface(camera_id)
+            except Exception as e:
+                app.logger.warning(f"[NETWORK] Interface update failed on toggle: {e}")
+
             status = 'enabled' if data['enabled'] else 'disabled'
             
             # Log and notify camera enable/disable
@@ -863,10 +1088,39 @@ def config_editor():
         try:
             raw_config = request.form.get('config_content', '')
             
-            # Write the raw config to file
+            # Atomic write to disk with fsync
             config_path = config_manager.config_path
-            with open(config_path, 'w', encoding='utf-8') as f:
-                f.write(raw_config)
+            dirpath = os.path.dirname(config_path) or "."
+            import tempfile, os
+            fd, tmppath = tempfile.mkstemp(prefix=".config.xml.", dir=dirpath)
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as tmp:
+                    tmp.write(raw_config)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                os.replace(tmppath, config_path)
+                # fsync directory
+                try:
+                    dir_fd = os.open(dirpath, os.O_DIRECTORY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except Exception:
+                    pass
+            except Exception:
+                try:
+                    if os.path.exists(tmppath):
+                        os.unlink(tmppath)
+                except Exception:
+                    pass
+                raise
+            
+            # Reload in-process configuration immediately
+            try:
+                config_manager.reload_config()
+            except Exception as e:
+                app.logger.warning(f"[CONFIG] Reload after raw save failed: {e}")
             
             flash('Configuration saved successfully!', 'success')
             
@@ -876,9 +1130,17 @@ def config_editor():
                              capture_output=True, text=True, timeout=10)
             except:
                 pass  # Service reload is best effort
+            
+            # Post/Redirect/Get to avoid stale content and resubmissions
+            return redirect(url_for('config_editor'))
                 
         except Exception as e:
             flash(f'Error saving configuration: {str(e)}', 'error')
+            # Emergency alert on failure
+            try:
+                notification_manager.notify_fatal_error(f"Config write failure while saving raw config: {e}")
+            except Exception:
+                pass
     
     # Read current config file
     try:
@@ -889,7 +1151,12 @@ def config_editor():
         config_content = f"<!-- Error reading config file: {str(e)} -->"
         flash(f'Error reading configuration: {str(e)}', 'error')
     
-    return render_template('config_editor.html', config_content=config_content)
+    # No-cache headers to always fetch latest from disk
+    resp = make_response(render_template('config_editor.html', config_content=config_content))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
 
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
@@ -899,12 +1166,30 @@ def settings():
             'enabled': request.form.get('enabled') == 'on',
             'base_interface': request.form.get('base_interface', 'eth0'),
             'base_ip_range': request.form.get('base_ip_range', '192.168.1.100'),
+            'ping_interval': int(request.form.get('ping_interval', 30)),
             'pushover_token': request.form.get('pushover_token', ''),
             'pushover_user': request.form.get('pushover_user', ''),
-            'web_port': int(request.form.get('web_port', 8080))
+            'web_port': int(request.form.get('web_port', 8080)),
+            'notify_camera_offline': request.form.get('notify_camera_offline') == 'on',
+            'notify_camera_offline_priority': int(request.form.get('notify_camera_offline_priority', 0)),
+            'notify_camera_online': request.form.get('notify_camera_online') == 'on',
+            'notify_camera_online_priority': int(request.form.get('notify_camera_online_priority', 0)),
+            'notify_system_error': request.form.get('notify_system_error') == 'on',
+            'notify_system_error_priority': int(request.form.get('notify_system_error_priority', 0)),
+            'notify_service_restart': request.form.get('notify_service_restart') == 'on',
+            'notify_service_restart_priority': int(request.form.get('notify_service_restart_priority', 0))
         }
         
-        config_manager.update_system_config(system_config)
+        # Save system configuration
+        try:
+            config_manager.update_system_config(system_config)
+        except Exception as e:
+            flash(f'Failed to save configuration: {str(e)}', 'error')
+            try:
+                notification_manager.notify_fatal_error(f"Config write failure while updating settings: {e}")
+            except Exception:
+                pass
+            return redirect(url_for('settings'))
         
         notification_manager.update_credentials(
             system_config['pushover_token'],
@@ -1015,6 +1300,7 @@ def api_system_status():
 def api_cameras_status():
     """API endpoint for cameras status"""
     try:
+        ensure_fresh_config()
         cameras = config_manager.get_cameras()
         status_data = []
         
@@ -1025,14 +1311,157 @@ def api_cameras_status():
                 'enabled': camera.get('enabled', True),
                 'rtsp_url': camera.get('rtsp_url', ''),
                 'onvif_ip': camera.get('onvif_ip', ''),
-                'onvif_port': camera.get('onvif_port', 80)
+                'onvif_port': camera.get('onvif_port', 80),
+                'onvif_mac': camera.get('onvif_mac', '')
             })
         
         return jsonify({'success': True, 'cameras': status_data})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
-@app.route('/api/rtsp/validate', methods=['POST'])
+@app.route('/camera/<camera_id>/traffic')
+def camera_traffic(camera_id):
+    """Display traffic monitoring page for a camera"""
+    cameras = config_manager.get_cameras()
+    camera = next((c for c in cameras if c['id'] == camera_id), None)
+    
+    if not camera:
+        flash(f'Camera {camera_id} not found', 'error')
+        return redirect(url_for('cameras'))
+    
+    return render_template('traffic.html', camera=camera)
+
+@app.route('/api/camera/<camera_id>/traffic/current')
+def api_camera_traffic_current(camera_id):
+    """Get current traffic statistics for a camera"""
+    try:
+        ensure_fresh_config()
+        camera = config_manager.get_camera(camera_id)
+        if not camera:
+            return jsonify({'error': 'Camera not found'}), 404
+
+        virtual_ip = camera.get('onvif_ip')
+        camera_ip = _extract_camera_ip(camera.get('rtsp_url', ''))
+        if not virtual_ip or not camera_ip:
+            return jsonify({'error': 'Missing camera IPs for traffic lookup'}), 400
+
+        counters = _get_iptables_counters(virtual_ip, camera_ip)
+        if counters is None:
+            return jsonify({'error': 'Unable to read iptables counters'}), 500
+
+        rx_bytes, tx_bytes, rx_packets, tx_packets = counters
+        now = time.time()
+
+        # Compute rates from local cache
+        last = traffic_last_stats.get(camera_id)
+        rates = {}
+        if last and now > last['timestamp']:
+            dt = now - last['timestamp']
+            rates = {
+                'rx_bytes_per_sec': max(0.0, (rx_bytes - last['rx_bytes']) / dt),
+                'tx_bytes_per_sec': max(0.0, (tx_bytes - last['tx_bytes']) / dt),
+                'rx_packets_per_sec': max(0.0, (rx_packets - last['rx_packets']) / dt),
+                'tx_packets_per_sec': max(0.0, (tx_packets - last['tx_packets']) / dt),
+            }
+
+        # Update cache
+        traffic_last_stats[camera_id] = {
+            'timestamp': now,
+            'rx_bytes': rx_bytes,
+            'tx_bytes': tx_bytes,
+            'rx_packets': rx_packets,
+            'tx_packets': tx_packets,
+        }
+
+        return jsonify({
+            'success': True,
+            'stats': {
+                'timestamp': now,
+                'rx_bytes': rx_bytes,
+                'tx_bytes': tx_bytes,
+                'rx_packets': rx_packets,
+                'tx_packets': tx_packets,
+                'virtual_ip': virtual_ip
+            },
+            'rates': rates
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/camera/<camera_id>/traffic/graph')
+def api_camera_traffic_graph(camera_id):
+    """Generate traffic graph for a camera"""
+    try:
+        ensure_fresh_config()
+        time_range = request.args.get('range', '-1h')  # Default to last hour
+        width = int(request.args.get('width', 800))
+        height = int(request.args.get('height', 400))
+        
+        # Generate graph file in the same directory as the active config.xml
+        config_dir = os.path.dirname(config_manager.config_path)
+        graph_file = os.path.join(config_dir, f"camera_{camera_id}_traffic_{time_range.replace('-', '')}.png")
+        
+        # Ensure RRD mapping exists for this camera in the monitor instance
+        if camera_id not in getattr(traffic_monitor, 'cameras', {}):
+            camera = config_manager.get_camera(camera_id)
+            if camera:
+                virtual_ip = camera.get('onvif_ip')
+                camera_ip = _extract_camera_ip(camera.get('rtsp_url', ''))
+                if virtual_ip and camera_ip:
+                    # Mirror TrafficMonitor.add_camera structure without starting threads
+                    rrd_path = os.path.join(traffic_monitor.rrd_base_path, f"camera_{camera_id}_traffic.rrd")
+                    traffic_monitor.cameras[camera_id] = {
+                        'virtual_ip': virtual_ip,
+                        'camera_ip': camera_ip,
+                        'rrd_file': rrd_path
+                    }
+        
+        success = traffic_monitor.create_graph(
+            camera_id, graph_file, time_range, width, height
+        )
+        
+        if success and os.path.exists(graph_file):
+            return send_from_directory(config_dir, os.path.basename(graph_file))
+        else:
+            return jsonify({'error': 'Failed to generate graph'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/camera/<camera_id>/traffic/data')
+def api_camera_traffic_data(camera_id):
+    """Get RRD traffic data for a camera"""
+    try:
+        ensure_fresh_config()
+        start_time = request.args.get('start', '-1h')
+        end_time = request.args.get('end', 'now')
+        
+        # Ensure RRD mapping exists similar to graph endpoint
+        if camera_id not in getattr(traffic_monitor, 'cameras', {}):
+            camera = config_manager.get_camera(camera_id)
+            if camera:
+                virtual_ip = camera.get('onvif_ip')
+                camera_ip = _extract_camera_ip(camera.get('rtsp_url', ''))
+                if virtual_ip and camera_ip:
+                    rrd_path = os.path.join(traffic_monitor.rrd_base_path, f"camera_{camera_id}_traffic.rrd")
+                    traffic_monitor.cameras[camera_id] = {
+                        'virtual_ip': virtual_ip,
+                        'camera_ip': camera_ip,
+                        'rrd_file': rrd_path
+                    }
+        
+        data = traffic_monitor.get_rrd_data(camera_id, start_time, end_time)
+        
+        if data:
+            return jsonify({'success': True, 'data': data})
+        else:
+            return jsonify({'error': 'No data available'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/validate_rtsp', methods=['POST'])
 def validate_rtsp():
     """Validate RTSP URL and probe stream parameters"""
     try:
@@ -1067,6 +1496,11 @@ def validate_rtsp():
         app.logger.error(f"[RTSP_VALIDATE] Error validating RTSP URL: {str(e)}")
         return jsonify({'success': False, 'error': f'Validation error: {str(e)}'})
 
+# Compatibility alias for front-end endpoint
+@app.route('/api/rtsp/validate', methods=['POST'])
+def api_validate_rtsp():
+    return validate_rtsp()
+
 def probe_rtsp_stream(rtsp_url, timeout=10):
     """
     Probe RTSP stream to get video parameters using ffprobe
@@ -1090,10 +1524,12 @@ def probe_rtsp_stream(rtsp_url, timeout=10):
             'ffprobe',
             '-v', 'error',
             '-select_streams', 'v:0',  # Select first video stream
-            '-show_entries', 'stream=width,height,r_frame_rate,bit_rate,codec_name',
+            '-show_entries', 'stream=width,height,r_frame_rate,bit_rate,codec_name:format=bit_rate',
             '-of', 'json',
             '-timeout', str(timeout * 1000000),  # timeout in microseconds
             '-rtsp_transport', 'tcp',
+            '-analyzeduration', '5000000',  # 5 seconds
+            '-probesize', '5000000',  # 5MB
             rtsp_url
         ]
         
@@ -1150,11 +1586,19 @@ def probe_rtsp_stream(rtsp_url, timeout=10):
             except (ValueError, ZeroDivisionError):
                 pass
         
-        # Extract bitrate (convert to kbps)
+        # Extract bitrate (convert to kbps) - try stream first, then format
         bitrate_kbps = None
-        if 'bit_rate' in stream:
+        if 'bit_rate' in stream and stream['bit_rate']:
             try:
                 bitrate_bps = int(stream['bit_rate'])
+                bitrate_kbps = round(bitrate_bps / 1000)
+            except (ValueError, TypeError):
+                pass
+        
+        # If stream bitrate not available, try format bitrate
+        if bitrate_kbps is None and 'format' in probe_data and 'bit_rate' in probe_data['format']:
+            try:
+                bitrate_bps = int(probe_data['format']['bit_rate'])
                 bitrate_kbps = round(bitrate_bps / 1000)
             except (ValueError, TypeError):
                 pass

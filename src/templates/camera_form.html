@@ -105,7 +105,7 @@
                         <div class="col-md-6">
                             <div class="mb-3">
                                 <label for="rtsp_password" class="form-label">RTSP Password</label>
-                                <input type="password" class="form-control" id="rtsp_password" name="rtsp_password" 
+                                <input type="text" class="form-control" id="rtsp_password" name="rtsp_password" 
                                        value="{{ camera.rtsp_password if camera else '' }}">
                                 <div class="form-text">Leave empty if no authentication required</div>
                             </div>
@@ -618,27 +618,30 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 });
 
-// Function to parse RTSP URL and populate credentials
+// Function to parse RTSP URL and populate credentials (supports rtsp:// without relying on URL())
 function parseRtspUrl(url) {
-    if (!url || !url.startsWith('rtsp://')) {
+    if (!url || !url.toLowerCase().startsWith('rtsp://')) {
         if (url) {
             showAlert('warning', 'RTSP URL should start with rtsp://');
         }
         return;
     }
-    
+
     try {
-        const urlObj = new URL(url);
-        
-        // Extract username and password if present
-        if (urlObj.username) {
-            document.getElementById('rtsp_username').value = urlObj.username;
-        }
-        if (urlObj.password) {
-            document.getElementById('rtsp_password').value = urlObj.password;
+        // Regex to capture optional creds and host/port/path
+        // rtsp://[username[:password]@]host[:port]/path
+        const m = url.match(/^rtsp:\/\/(?:(?<user>[^:@\/\s?#]+)(?::(?<pass>[^@\/#\s]*))?@)?(?<host>\[[^\]]+\]|[^:\/\s?#]+)(?::(?<port>\d+))?(?<rest>[^\s]*)$/i);
+        if (m && m.groups) {
+            if (m.groups.user) {
+                document.getElementById('rtsp_username').value = decodeURIComponent(m.groups.user);
+            }
+            if (m.groups.pass) {
+                document.getElementById('rtsp_password').value = decodeURIComponent(m.groups.pass);
+            }
         }
     } catch (error) {
-        console.log('Invalid URL format:', error);
+        // Non-fatal: do not block validation; just log
+        console.log('RTSP parse warning:', error);
     }
 }
 
@@ -674,7 +677,7 @@ function validateRtspUrl() {
                 document.getElementById('resolution').value = data.resolution;
             }
             if (data.fps) {
-                document.getElementById('fps').value = Math.floor(data.fps); // Ensure integer
+                document.getElementById('fps').value = Math.floor(data.fps);
             }
             if (data.bitrate_kbps) {
                 document.getElementById('bitrate_kbps').value = data.bitrate_kbps;

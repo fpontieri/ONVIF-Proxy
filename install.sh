@@ -24,6 +24,45 @@ print_status() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
 
+# Ensure sudoers entry exists to allow iptables listing by service user
+ensure_iptables_sudoers() {
+    print_status "Ensuring sudoers permissions for iptables listing..."
+    local SFILE="/etc/sudoers.d/onvif-proxy-iptables"
+    cat > "$SFILE" << EOF
+# Allow onvif-proxy user to run iptables list commands without password
+$SERVICE_USER ALL=(ALL) NOPASSWD: /sbin/iptables, /usr/sbin/iptables, /sbin/iptables-nft, /usr/sbin/iptables-nft, /sbin/iptables-save, /usr/sbin/iptables-save
+EOF
+    chmod 440 "$SFILE"
+}
+
+# Ensure accounting chain exists and is linked
+ensure_traffic_acct_chain() {
+    print_status "Ensuring TRAFFIC_ACCT accounting chain is present and linked to FORWARD..."
+    # Try both common iptables locations
+    for ipt in /usr/sbin/iptables /sbin/iptables; do
+        [ -x "$ipt" ] || continue
+        # Create chain (ignore error if exists)
+        /usr/bin/sudo -n "$ipt" -t filter -N TRAFFIC_ACCT 2>/dev/null || true
+        # Ensure FORWARD jump exists
+        if ! /usr/bin/sudo -n "$ipt" -t filter -C FORWARD -j TRAFFIC_ACCT 2>/dev/null; then
+            /usr/bin/sudo -n "$ipt" -t filter -I FORWARD -j TRAFFIC_ACCT || true
+        fi
+        break
+    done
+}
+
+# Ensure config directory and file permissions are correct
+ensure_config_permissions() {
+    print_status "Ensuring configuration directory and file permissions..."
+    mkdir -p "/var/lib/onvif-proxy"
+    chown $SERVICE_USER:$SERVICE_USER "/var/lib/onvif-proxy" || true
+    chmod 755 "/var/lib/onvif-proxy" || true
+    if [ -f "/var/lib/onvif-proxy/config.xml" ]; then
+        chown $SERVICE_USER:$SERVICE_USER "/var/lib/onvif-proxy/config.xml" || true
+        chmod 644 "/var/lib/onvif-proxy/config.xml" || true
+    fi
+}
+
 print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
@@ -59,13 +98,76 @@ stop_services_safely() {
 
 # Function to show usage
 show_usage() {
-    echo "Usage: $0 [install|uninstall]"
+    echo "Usage: $0 [install|deploy|uninstall]"
     echo ""
     echo "Commands:"
-    echo "  install    Install ONVIF Proxy system"
+    echo "  install    Install ONVIF Proxy system (full installation)"
+    echo "  deploy     Deploy code changes (preserves config, faster update)"
     echo "  uninstall  Remove ONVIF Proxy system completely"
     echo ""
     echo "If no command is specified, 'install' is assumed."
+}
+
+# Function to remove ONVIF interfaces
+remove_onvif_interfaces() {
+    print_status "Cleaning up existing ONVIF interfaces..."
+    for IFACE_PATH in /sys/class/net/onvif-*; do
+        [ -e "$IFACE_PATH" ] || continue
+        IFACE=$(basename "$IFACE_PATH")
+        print_status "Removing existing interface: $IFACE"
+        ip link delete "$IFACE" 2>/dev/null || true
+    done
+}
+
+# Function to copy application files (excluding config)
+copy_application_files() {
+    print_status "Copying application files to $INSTALL_DIR..."
+    
+    # Create installation directory
+    mkdir -p "$INSTALL_DIR"
+    
+    # Copy all files except config.xml
+    rsync -av --exclude='config.xml' --exclude='.git' --exclude='__pycache__' \
+          "$SCRIPT_DIR/" "$INSTALL_DIR/"
+    
+    # Set proper permissions
+    print_status "Setting file permissions..."
+    chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
+    chmod +x "$INSTALL_DIR/src/main_service.py"
+    chmod +x "$INSTALL_DIR/src/web_interface.py"
+    chmod +x "$INSTALL_DIR/src/watchdog.py"
+}
+
+# Function to install systemd services
+install_systemd_services() {
+    print_status "Installing systemd service files..."
+    cp "$INSTALL_DIR/onvif-proxy.service" "$SYSTEMD_DIR/"
+    cp "$INSTALL_DIR/onvif-proxy-web.service" "$SYSTEMD_DIR/"
+    cp "$INSTALL_DIR/onvif-proxy-watchdog.service" "$SYSTEMD_DIR/"
+
+    # Update service files with correct paths
+    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy.service"
+    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy-web.service"
+    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy-watchdog.service"
+
+    # Update service files to use correct user
+    # Keep main service as root (needs CAP_NET_ADMIN and DHCP), run web and watchdog as service user
+    sed -i "s|User=root|User=$SERVICE_USER|g" "$SYSTEMD_DIR/onvif-proxy-web.service"
+    sed -i "s|Group=root|Group=$SERVICE_USER|g" "$SYSTEMD_DIR/onvif-proxy-web.service"
+    sed -i "s|User=root|User=$SERVICE_USER|g" "$SYSTEMD_DIR/onvif-proxy-watchdog.service"
+    sed -i "s|Group=root|Group=$SERVICE_USER|g" "$SYSTEMD_DIR/onvif-proxy-watchdog.service"
+    
+    # Reload systemd
+    systemctl daemon-reload
+}
+
+# Function to start services
+start_services() {
+    print_status "Starting ONVIF Proxy services..."
+    systemctl enable onvif-proxy onvif-proxy-web onvif-proxy-watchdog
+    systemctl start onvif-proxy
+    systemctl start onvif-proxy-web
+    systemctl start onvif-proxy-watchdog
 }
 
 # Check if running as root
@@ -88,6 +190,9 @@ install_onvif_proxy() {
     # Stop services before installation to avoid conflicts while updating files
     print_status "Stopping ONVIF Proxy services before installation..."
     stop_services_safely
+    
+    # Clean up any existing onvif interfaces before installation
+    remove_onvif_interfaces
 
     # Update system packages
     print_status "Updating system packages..."
@@ -109,7 +214,11 @@ install_onvif_proxy() {
         libxslt1-dev \
         python3-dev \
         isc-dhcp-client \
-        ffmpeg
+        ffmpeg \
+        iptables \
+        iptables-persistent \
+        rrdtool \
+        librrd-dev
 
     # Install Python dependencies using system packages (more reliable)
     print_status "Installing Python dependencies..."
@@ -119,7 +228,8 @@ install_onvif_proxy() {
         python3-lxml \
         python3-opencv \
         python3-psutil \
-        gunicorn
+        gunicorn \
+        python3-rrdtool
 
     # Install netifaces via pip with system package override
     print_status "Installing additional Python packages..."
@@ -142,17 +252,8 @@ install_onvif_proxy() {
         print_status "Service user $SERVICE_USER already exists"
     fi
 
-    # Create installation directory
-    print_status "Creating installation directory: $INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR"
-    cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR/"
-
-    # Set proper permissions
-    print_status "Setting file permissions..."
-    chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
-    chmod +x "$INSTALL_DIR/src/main_service.py"
-    chmod +x "$INSTALL_DIR/src/web_interface.py"
-    chmod +x "$INSTALL_DIR/src/watchdog.py"
+    # Copy application files
+    copy_application_files
 
     # Create log directory
     print_status "Creating log directory: $LOG_DIR"
@@ -169,37 +270,16 @@ install_onvif_proxy() {
     mkdir -p "/run/onvif-proxy"
     chown $SERVICE_USER:$SERVICE_USER "/run/onvif-proxy"
 
-    # Install systemd service files
-    print_status "Installing systemd service files..."
-    cp "$INSTALL_DIR/onvif-proxy.service" "$SYSTEMD_DIR/"
-    cp "$INSTALL_DIR/onvif-proxy-web.service" "$SYSTEMD_DIR/"
-    cp "$INSTALL_DIR/onvif-proxy-watchdog.service" "$SYSTEMD_DIR/"
-
-    # Update service files with correct paths
-    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy.service"
-    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy-web.service"
-    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy-watchdog.service"
-
-    # Update service files to use correct user
-    # Keep main service as root (needs CAP_NET_ADMIN and DHCP), run web and watchdog as service user
-    sed -i "s|User=root|User=$SERVICE_USER|g" "$SYSTEMD_DIR/onvif-proxy-web.service"
-    sed -i "s|Group=root|Group=$SERVICE_USER|g" "$SYSTEMD_DIR/onvif-proxy-web.service"
-    sed -i "s|User=root|User=$SERVICE_USER|g" "$SYSTEMD_DIR/onvif-proxy-watchdog.service"
-    sed -i "s|Group=root|Group=$SERVICE_USER|g" "$SYSTEMD_DIR/onvif-proxy-watchdog.service"
-
+    # Install systemd services
+    install_systemd_services
+    # Ensure iptables sudoers present
+    ensure_iptables_sudoers
+    # Ensure accounting chain exists
+    ensure_traffic_acct_chain
+    
     # Enable systemd-networkd for persistent network configuration
     print_status "Enabling and starting systemd-networkd..."
     systemctl enable --now systemd-networkd
-
-    # Reload systemd daemon
-    print_status "Reloading systemd daemon..."
-    systemctl daemon-reload
-
-    # Enable services
-    print_status "Enabling ONVIF Proxy services..."
-    systemctl enable onvif-proxy.service
-    systemctl enable onvif-proxy-web.service
-    systemctl enable onvif-proxy-watchdog.service
 
     # Create sudoers file for network management
     print_status "Configuring sudo permissions for network management..."
@@ -211,11 +291,31 @@ $SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl reload systemd-networkd
 $SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl restart onvif-proxy
 $SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl stop onvif-proxy
 $SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl start onvif-proxy
+$SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl reload onvif-proxy
 $SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl reload-or-restart onvif-proxy
+$SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl restart onvif-proxy-web
+$SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl stop onvif-proxy-web
+$SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl start onvif-proxy-web
+$SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl restart onvif-proxy-watchdog
+$SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl stop onvif-proxy-watchdog
+$SERVICE_USER ALL=(ALL) NOPASSWD: /bin/systemctl start onvif-proxy-watchdog
 EOF
 
-    # Set proper permissions for sudoers file
-    chmod 440 "$SUDOERS_FILE"
+    # Create additional sudoers file for dhclient permissions
+    print_status "Configuring DHCP client permissions..."
+    cat > "/etc/sudoers.d/onvif-proxy-dhclient" << EOF
+# Allow onvif-proxy user to use dhclient for DHCP on virtual interfaces
+$SERVICE_USER ALL=(ALL) NOPASSWD: /sbin/dhclient
+EOF
+
+    # Set proper permissions for sudoers files
+    chmod 440 "/etc/sudoers.d/onvif-proxy-dhclient"
+    
+    # Create DHCP configuration directory and set permissions
+    print_status "Creating DHCP configuration directory..."
+    mkdir -p "/etc/dhcp"
+    chown root:root "/etc/dhcp"
+    chmod 755 "/etc/dhcp"
 
     # Create config directory and file
     print_status "Creating configuration directory..."
@@ -251,6 +351,9 @@ EOF
         chown $SERVICE_USER:$SERVICE_USER "/var/lib/onvif-proxy/config.xml"
         chmod 644 "/var/lib/onvif-proxy/config.xml"
     fi
+
+    # Final guard on permissions
+    ensure_config_permissions
 
     # Create startup script
     print_status "Creating management scripts..."
@@ -300,11 +403,8 @@ EOF
 
     chmod +x "$CONTROL_SCRIPT"
 
-    # Restart services after successful installation
-    print_status "Starting ONVIF Proxy services..."
-    systemctl restart onvif-proxy
-    systemctl restart onvif-proxy-web
-    systemctl restart onvif-proxy-watchdog
+    # Start services after successful installation
+    start_services
     
     # Wait a moment for web service to start
     sleep 2
@@ -342,6 +442,48 @@ print(config.get_system_config().get('web_port', 5000))
     print_success "All services are now running!"
 }
 
+# Deploy function - fast update preserving config
+deploy_onvif_proxy() {
+    print_status "Starting ONVIF Proxy deployment (fast update)..."
+    
+    # Stop services before deployment
+    print_status "Stopping ONVIF Proxy services..."
+    stop_services_safely
+    
+    # Remove ONVIF interfaces
+    remove_onvif_interfaces
+    
+    # Copy application files (excludes config.xml)
+    copy_application_files
+
+    # Ensure active config location has proper permissions
+    ensure_config_permissions
+    
+    # Install/update systemd services
+    install_systemd_services
+    # Ensure iptables sudoers present
+    ensure_iptables_sudoers
+    
+    # Start services
+    start_services
+    
+    # Wait a moment for web service to start
+    sleep 2
+    
+    # Get system configuration for web port
+    WEB_PORT=$(PYTHONPATH=$INSTALL_DIR python3 -c "
+import sys
+sys.path.insert(0, '$INSTALL_DIR')
+from src.config_manager import ConfigManager
+config = ConfigManager('/var/lib/onvif-proxy/config.xml')
+print(config.get_system_config().get('web_port', 5000))
+" 2>/dev/null || echo "5000")
+    
+    print_success "ONVIF Proxy deployment completed successfully!"
+    print_success "Web interface is available at: http://localhost:$WEB_PORT"
+    print_success "Configuration preserved from previous installation"
+}
+
 # Main script logic
 main() {
     check_root
@@ -351,6 +493,9 @@ main() {
     case "${1:-install}" in
         install)
             install_onvif_proxy
+            ;;
+        deploy)
+            deploy_onvif_proxy
             ;;
         uninstall)
             echo ""
@@ -436,9 +581,10 @@ except Exception as e:
         ip link delete "$IFACE" 2>/dev/null || true
     done
 
-    # Remove sudoers file
+    # Remove sudoers files
     print_status "Removing sudo permissions..."
     rm -f "$SUDOERS_FILE"
+    rm -f "/etc/sudoers.d/onvif-proxy-dhclient"
 
     # Remove control script
     print_status "Removing management scripts..."

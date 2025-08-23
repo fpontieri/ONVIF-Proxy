@@ -1,6 +1,6 @@
 [Unit]
 Description=ONVIF Proxy Watchdog Service
-Documentation=https://github.com/your-repo/onvif-proxy
+Documentation=https://github.com/fpontieri/ONVIF-Proxy
 After=network.target onvif-proxy.service
 Wants=network.target
 
@@ -17,7 +17,8 @@ StandardError=journal
 SyslogIdentifier=onvif-proxy-watchdog
 
 # Security settings
-NoNewPrivileges=true
+# Sudo needs to elevate for iptables listing; disable NNP
+NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/onvif-proxy /var/log /var/lib/onvif-proxy

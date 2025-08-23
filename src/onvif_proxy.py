@@ -9,10 +9,42 @@ import threading
 import time
 import cv2
 import socket
+import uuid
+import time
+import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import xml.etree.ElementTree as ET
+import logging
+
+# Configure logging to use system's default logging (systemd-journald) when available
+logger = logging.getLogger('ONVIFProxy')
+root_logger = logging.getLogger()
+# Root at DEBUG so file handler can capture full bodies; journald handler will be set to INFO
+root_logger.setLevel(logging.DEBUG)
+
+# Avoid duplicate handlers on reload
+for h in list(root_logger.handlers):
+    root_logger.removeHandler(h)
+
+handler = None
+try:
+    from systemd.journal import JournalHandler  # type: ignore
+    handler = JournalHandler(SYSLOG_IDENTIFIER='onvif-proxy')
+except Exception:
+    # Fallback to stdout so systemd can capture it
+    handler = logging.StreamHandler()
+
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+handler.setLevel(logging.INFO)
+root_logger.addHandler(handler)
+
+# File logging to /tmp/onvif-proxy.log removed; rely on journald/stream handlers only
+
+# Proxy version used in ONVIF responses
+PROXY_VERSION = "1.0.1"
 
 class ONVIFHandler(BaseHTTPRequestHandler):
     """HTTP handler for ONVIF requests"""
@@ -21,34 +53,202 @@ class ONVIFHandler(BaseHTTPRequestHandler):
         self.camera_config = camera_config or {}
         super().__init__(*args, **kwargs)
     
-    def do_GET(self):
-        """Handle GET requests"""
-        parsed_path = urlparse(self.path)
+    def _log_request(self, method, path, headers, body=''):
+        """Log incoming request details"""
+        request_id = str(uuid.uuid4())[:8]
+        client_ip = self.client_address[0]
+        # Save on instance so other methods can correlate
+        self.request_id = request_id
+        # Local address (the interface/IP this server is bound to)
+        try:
+            local_ip, local_port = self.request.getsockname()[:2]
+            local_addr_info = f" on {local_ip}:{local_port}"
+        except Exception:
+            local_addr_info = ""
         
-        if parsed_path.path == "/onvif/device_service":
-            self.handle_device_service()
-        elif parsed_path.path == "/onvif/media_service":
-            self.handle_media_service()
-        elif parsed_path.path.startswith("/stream"):
-            self.handle_stream_request()
-        else:
-            self.send_error(404, "Not Found")
+        # Log basic request info
+        logger.info(f"[REQ {request_id}] {method} {path} from {client_ip}{local_addr_info}")
+        
+        # Log headers (excluding sensitive ones)
+        safe_headers = {k: v for k, v in headers.items() 
+                      if k.lower() not in ['authorization', 'x-api-key']}
+        logger.debug(f"[REQ {request_id}] Headers: {safe_headers}")
+        
+        # Log full request body at DEBUG (captured by file handler)
+        if body:
+            logger.debug(f"[REQ {request_id}] Body: {body}")
+        
+        return request_id
+
+    def _get_local_base_url(self) -> str:
+        """Build base URL from local socket address rather than config to ensure correct interface/IP."""
+        try:
+            local_ip, local_port = self.request.getsockname()[:2]
+        except Exception:
+            # Fallback to configured values
+            local_ip = self.camera_config.get('onvif_ip', '127.0.0.1')
+            local_port = self.camera_config.get('onvif_port', 80)
+        return f"http://{local_ip}:{local_port}"
+    
+    def _video_params(self):
+        """Return video parameters from camera_config with sensible defaults."""
+        return {
+            'encoding': self.camera_config.get('encoding', 'H264'),
+            'width': int(self.camera_config.get('video_width', 1920)),
+            'height': int(self.camera_config.get('video_height', 1080)),
+            'framerate': int(self.camera_config.get('framerate', 30)),
+            'bitrate': int(self.camera_config.get('bitrate', 4096)),
+            'profile_token': self.camera_config.get('profile_token', 'Profile_1'),
+            'video_source_token': self.camera_config.get('video_source_token', 'VideoSource_1'),
+            'video_encoder_token': self.camera_config.get('video_encoder_token', 'VideoEncoder_1'),
+        }
+    
+    def _log_response(self, request_id, status_code, headers, body='', error=''):
+        """Log response details"""
+        # Log basic response info
+        log_msg = f"[RES {request_id}] Status: {status_code}"
+        if error:
+            log_msg += f" Error: {error}"
+        logger.info(log_msg)
+        
+        # Log full response body at DEBUG (captured by file handler)
+        if body:
+            logger.debug(f"[RES {request_id}] Response: {body}")
+    
+    def do_GET(self):
+        """Handle GET requests with logging"""
+        start_time = time.time()
+        request_id = self._log_request('GET', self.path, dict(self.headers))
+        
+        try:
+            parsed_path = urlparse(self.path)
+            
+            if parsed_path.path == "/onvif/device_service":
+                response = self.handle_device_service()
+                self._log_response(request_id, 200, {}, response)
+            elif parsed_path.path == "/onvif/media_service":
+                response = self.handle_media_service()
+                self._log_response(request_id, 200, {}, response)
+            elif parsed_path.path.startswith("/stream"):
+                self.handle_stream_request()
+                self._log_response(request_id, 200, {}, "[Stream data]")
+            else:
+                self.send_error(404, "Not Found")
+                self._log_response(request_id, 404, {}, error="Not Found")
+        except Exception as e:
+            logger.error(f"[REQ {request_id}] Error handling GET request: {str(e)}", exc_info=True)
+            self.send_error(500, f"Internal Server Error: {str(e)}")
+            self._log_response(request_id, 500, {}, error=str(e))
+        finally:
+            duration = (time.time() - start_time) * 1000  # in ms
+            logger.info(f"[REQ {request_id}] Completed in {duration:.2f}ms")
+    
+    def _extract_soap_action(self, post_data: str) -> str:
+        """Extract the SOAP action (operation) from the SOAP body"""
+        try:
+            root = ET.fromstring(post_data)
+            # Support SOAP 1.2 and 1.1 namespaces
+            soap_namespaces = [
+                'http://www.w3.org/2003/05/soap-envelope',
+                'http://schemas.xmlsoap.org/soap/envelope/'
+            ]
+            body = None
+            for ns in soap_namespaces:
+                body = root.find(f'.//{{{ns}}}Body')
+                if body is not None:
+                    break
+            # If Body found, the action is the first direct child element of Body
+            if body is not None:
+                for child in list(body):
+                    # Only consider element nodes
+                    tag = getattr(child, 'tag', None)
+                    if not isinstance(tag, str):
+                        continue
+                    local = tag.split('}')[-1] if '}' in tag else tag
+                    if local:
+                        return local
+            # Fallback: previous heuristic, but skip wsse:Security headers explicitly
+            for elem in root.iter():
+                tag = getattr(elem, 'tag', None)
+                if not isinstance(tag, str):
+                    continue
+                local = tag.split('}')[-1] if '}' in tag else tag
+                if local in ("Envelope", "Header", "Body", "Security"):
+                    continue
+                if local:
+                    return local
+        except Exception as e:
+            logger.debug(f"Could not parse SOAP action: {str(e)}")
+        return "Unknown"
     
     def do_POST(self):
-        """Handle POST requests (SOAP)"""
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length).decode('utf-8')
+        """Handle POST requests (SOAP) with logging"""
+        start_time = time.time()
         
-        if "GetDeviceInformation" in post_data:
-            self.handle_get_device_information()
-        elif "GetCapabilities" in post_data:
-            self.handle_get_capabilities()
-        elif "GetProfiles" in post_data:
-            self.handle_get_profiles()
-        elif "GetStreamUri" in post_data:
-            self.handle_get_stream_uri()
-        else:
-            self.send_soap_fault("Action not supported")
+        # Read request data
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length).decode('utf-8', errors='replace')
+        
+        # Log request
+        request_id = self._log_request('POST', self.path, dict(self.headers), post_data)
+        
+        try:
+            # Log SOAP action if present
+            soap_action = None
+            if 'SOAPAction' in self.headers:
+                soap_action = self.headers['SOAPAction']
+                logger.info(f"[REQ {request_id}] SOAPAction: {soap_action}")
+            
+            # Parse SOAP action from the body
+            action = self._extract_soap_action(post_data)
+            if action and action != 'Envelope':  # Skip the root Envelope element
+                logger.info(f"[REQ {request_id}] Detected ONVIF action: {action}")
+            
+            # Handle the request
+            response = None
+            if action == "GetDeviceInformation":
+                response = self.handle_get_device_information()
+            elif action == "GetCapabilities":
+                response = self.handle_get_capabilities()
+            elif action == "GetSystemDateAndTime":
+                response = self.handle_get_system_date_and_time()
+            elif action == "GetServices":
+                response = self.handle_get_services()
+            elif action == "GetServiceCapabilities":
+                response = self.handle_get_service_capabilities()
+            elif action == "GetProfiles":
+                response = self.handle_get_profiles()
+            elif action == "GetVideoSources":
+                response = self.handle_get_video_sources()
+            elif action == "GetVideoSourceConfigurations":
+                response = self.handle_get_video_source_configurations()
+            elif action == "GetVideoEncoderConfigurations":
+                response = self.handle_get_video_encoder_configurations()
+            elif action == "GetStreamUri":
+                response = self.handle_get_stream_uri()
+            elif action == "GetSnapshotUri":
+                response = self.handle_get_snapshot_uri()
+            elif action == "GetAudioOutputConfigurationOptions":
+                response = self.handle_get_audio_output_config_options()
+            else:
+                error_msg = f"Action not supported: {action}"
+                logger.warning(f"[REQ {request_id}] {error_msg}")
+                if soap_action:
+                    error_msg += f" (SOAPAction: {soap_action})"
+                self.send_soap_fault(error_msg)
+                self._log_response(request_id, 500, {}, error=error_msg)
+                return
+                
+            if response:
+                self._log_response(request_id, 200, {}, response)
+                
+        except Exception as e:
+            logger.error(f"[REQ {request_id}] Error handling POST request: {str(e)}", exc_info=True)
+            self.send_error(500, f"Internal Server Error: {str(e)}")
+            self._log_response(request_id, 500, {}, error=str(e))
+        finally:
+            duration = (time.time() - start_time) * 1000  # in ms
+            logger.info(f"[REQ {request_id}] Completed in {duration:.2f}ms")
     
     def handle_device_service(self):
         """Handle device service requests"""
@@ -57,16 +257,16 @@ class ONVIFHandler(BaseHTTPRequestHandler):
              targetNamespace="http://www.onvif.org/ver10/device/wsdl">
     <service name="DeviceService">
         <port name="DevicePort" binding="tns:DeviceBinding">
-            <soap:address location="http://{}:{}/onvif/device_service"/>
+            <soap:address location="{}/onvif/device_service"/>
         </port>
     </service>
-</definitions>""".format(self.camera_config.get('onvif_ip', '127.0.0.1'), 
-                         self.camera_config.get('onvif_port', 80))
+</definitions>""".format(self._get_local_base_url())
         
         self.send_response(200)
         self.send_header('Content-Type', 'application/xml')
         self.end_headers()
         self.wfile.write(wsdl_content.encode())
+        return wsdl_content
     
     def handle_media_service(self):
         """Handle media service requests"""
@@ -75,41 +275,46 @@ class ONVIFHandler(BaseHTTPRequestHandler):
              targetNamespace="http://www.onvif.org/ver10/media/wsdl">
     <service name="MediaService">
         <port name="MediaPort" binding="tns:MediaBinding">
-            <soap:address location="http://{}:{}/onvif/media_service"/>
+            <soap:address location="{}/onvif/media_service"/>
         </port>
     </service>
-</definitions>""".format(self.camera_config.get('onvif_ip', '127.0.0.1'), 
-                         self.camera_config.get('onvif_port', 80))
+</definitions>""".format(self._get_local_base_url())
         
         self.send_response(200)
         self.send_header('Content-Type', 'application/xml')
         self.end_headers()
         self.wfile.write(wsdl_content.encode())
+        return wsdl_content
     
     def handle_get_device_information(self):
         """Handle GetDeviceInformation SOAP request"""
-        response = """<?xml version="1.0" encoding="UTF-8"?>
+        try:
+            response = """<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
     <soap:Body>
         <tds:GetDeviceInformationResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
             <tds:Manufacturer>ONVIF-Proxy</tds:Manufacturer>
             <tds:Model>{}</tds:Model>
-            <tds:FirmwareVersion>1.0.0</tds:FirmwareVersion>
+            <tds:FirmwareVersion>{}</tds:FirmwareVersion>
             <tds:SerialNumber>{}</tds:SerialNumber>
-            <tds:HardwareId>ONVIF-Proxy-{}</tds:HardwareId>
+            <tds:HardwareId>1.0</tds:HardwareId>
         </tds:GetDeviceInformationResponse>
     </soap:Body>
 </soap:Envelope>""".format(
-            self.camera_config.get('name', 'Unknown Camera'),
-            self.camera_config.get('id', '000000'),
-            self.camera_config.get('id', '000000')
-        )
-        
-        self.send_soap_response(response)
+                self.camera_config.get('name', self.camera_config.get('model', 'ONVIF-Proxy-Camera')),
+                PROXY_VERSION,
+                self.camera_config.get('serial_number', '1234567890')
+            )
+            
+            return self.send_soap_response(response)
+            
+        except Exception as e:
+            logger.error(f"Error in handle_get_device_information: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Internal server error")
     
     def handle_get_capabilities(self):
         """Handle GetCapabilities SOAP request"""
-        base_url = f"http://{self.camera_config.get('onvif_ip', '127.0.0.1')}:{self.camera_config.get('onvif_port', 80)}"
+        base_url = self._get_local_base_url()
         
         response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
@@ -127,63 +332,106 @@ class ONVIFHandler(BaseHTTPRequestHandler):
     </soap:Body>
 </soap:Envelope>"""
         
-        self.send_soap_response(response)
+        return self.send_soap_response(response)
     
     def handle_get_profiles(self):
         """Handle GetProfiles SOAP request"""
-        response = """<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+        try:
+            vp = self._video_params()
+            response = """<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+               xmlns:tt="http://www.onvif.org/ver10/schema">
     <soap:Body>
-        <trt:GetProfilesResponse xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
-            <trt:Profiles token="MainProfile">
-                <tt:Name xmlns:tt="http://www.onvif.org/ver10/schema">Main Profile</tt:Name>
-                <tt:VideoSourceConfiguration xmlns:tt="http://www.onvif.org/ver10/schema" token="VideoSource">
-                    <tt:Name>Video Source</tt:Name>
+        <trt:GetProfilesResponse>
+            <trt:Profiles token="{profile_token}" fixed="true">
+                <tt:Name>{profile_token}</tt:Name>
+                <tt:VideoSourceConfiguration token="{video_source_token}">
+                    <tt:Name>{video_source_token}</tt:Name>
                     <tt:UseCount>1</tt:UseCount>
-                    <tt:SourceToken>VideoSourceToken</tt:SourceToken>
-                    <tt:Bounds x="0" y="0" width="1920" height="1080"/>
                 </tt:VideoSourceConfiguration>
-                <tt:VideoEncoderConfiguration xmlns:tt="http://www.onvif.org/ver10/schema" token="VideoEncoder">
-                    <tt:Name>Video Encoder</tt:Name>
+                <tt:VideoEncoderConfiguration token="{video_encoder_token}">
+                    <tt:Name>{video_encoder_token}</tt:Name>
                     <tt:UseCount>1</tt:UseCount>
-                    <tt:Encoding>H264</tt:Encoding>
+                    <tt:Encoding>{encoding}</tt:Encoding>
                     <tt:Resolution>
-                        <tt:Width>1920</tt:Width>
-                        <tt:Height>1080</tt:Height>
+                        <tt:Width>{width}</tt:Width>
+                        <tt:Height>{height}</tt:Height>
                     </tt:Resolution>
                     <tt:Quality>5</tt:Quality>
                     <tt:RateControl>
-                        <tt:FrameRateLimit>30</tt:FrameRateLimit>
+                        <tt:FrameRateLimit>{framerate}</tt:FrameRateLimit>
                         <tt:EncodingInterval>1</tt:EncodingInterval>
-                        <tt:BitrateLimit>8000</tt:BitrateLimit>
+                        <tt:BitrateLimit>{bitrate}</tt:BitrateLimit>
                     </tt:RateControl>
                 </tt:VideoEncoderConfiguration>
             </trt:Profiles>
         </trt:GetProfilesResponse>
     </soap:Body>
-</soap:Envelope>"""
-        
-        self.send_soap_response(response)
+</soap:Envelope>""".format(**vp)
+            
+            return self.send_soap_response(response)
+            
+        except Exception as e:
+            logger.error(f"Error in handle_get_profiles: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get profiles")
     
     def handle_get_stream_uri(self):
         """Handle GetStreamUri SOAP request"""
-        stream_uri = f"rtsp://{self.camera_config.get('onvif_ip', '127.0.0.1')}:{self.camera_config.get('onvif_port', 554)}/stream"
-        
-        response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+        try:
+            rtsp_url = self.camera_config.get('rtsp_url', '')
+            if not rtsp_url:
+                logger.error("No RTSP URL configured for camera")
+                return self.send_soap_fault("Stream URL not configured")
+                
+            response = """<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+               xmlns:tt="http://www.onvif.org/ver10/schema">
     <soap:Body>
-        <trt:GetStreamUriResponse xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
+        <trt:GetStreamUriResponse>
             <trt:MediaUri>
-                <tt:Uri xmlns:tt="http://www.onvif.org/ver10/schema">{stream_uri}</tt:Uri>
-                <tt:InvalidAfterConnect xmlns:tt="http://www.onvif.org/ver10/schema">false</tt:InvalidAfterConnect>
-                <tt:InvalidAfterReboot xmlns:tt="http://www.onvif.org/ver10/schema">false</tt:InvalidAfterReboot>
-                <tt:Timeout xmlns:tt="http://www.onvif.org/ver10/schema">PT60S</tt:Timeout>
+                <tt:Uri>{}</tt:Uri>
+                <tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>
+                <tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>
+                <tt:Timeout>PT0H0M0.000S</tt:Timeout>
             </trt:MediaUri>
         </trt:GetStreamUriResponse>
     </soap:Body>
+</soap:Envelope>""".format(rtsp_url)
+            
+            logger.info(f"Stream URI requested, returning: {rtsp_url}")
+            return self.send_soap_response(response)
+            
+        except Exception as e:
+            logger.error(f"Error in handle_get_stream_uri: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get stream URI")
+    
+    def handle_get_snapshot_uri(self):
+        """Handle GetSnapshotUri SOAP request"""
+        try:
+            # Provide a placeholder snapshot URI (could be implemented to generate JPEG snapshots)
+            base_url = self._get_local_base_url()
+            snapshot_uri = f"{base_url}/stream/snapshot.jpg"
+            response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+               xmlns:tt="http://www.onvif.org/ver10/schema">
+    <soap:Body>
+        <trt:GetSnapshotUriResponse>
+            <trt:MediaUri>
+                <tt:Uri>{snapshot_uri}</tt:Uri>
+                <tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>
+                <tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>
+                <tt:Timeout>PT0H0M0.000S</tt:Timeout>
+            </trt:MediaUri>
+        </trt:GetSnapshotUriResponse>
+    </soap:Body>
 </soap:Envelope>"""
-        
-        self.send_soap_response(response)
+            return self.send_soap_response(response)
+        except Exception as e:
+            logger.error(f"Error in handle_get_snapshot_uri: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get snapshot URI")
     
     def handle_stream_request(self):
         """Handle direct stream requests"""
@@ -196,35 +444,267 @@ class ONVIFHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, "Stream not available")
     
-    def send_soap_response(self, response_xml: str):
-        """Send SOAP response"""
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/soap+xml; charset=utf-8')
-        self.send_header('Content-Length', str(len(response_xml)))
-        self.end_headers()
-        self.wfile.write(response_xml.encode())
+    def handle_get_system_date_and_time(self):
+        """Handle GetSystemDateAndTime SOAP request"""
+        try:
+            now = time.gmtime()
+            response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+    <soap:Body>
+        <tds:GetSystemDateAndTimeResponse>
+            <tds:SystemDateAndTime>
+                <tt:DateTimeType>NTP</tt:DateTimeType>
+                <tt:DaylightSavings>false</tt:DaylightSavings>
+                <tt:TimeZone><tt:TZ>UTC</tt:TZ></tt:TimeZone>
+                <tt:UTCDateTime>
+                    <tt:Time>
+                        <tt:Hour>{now.tm_hour}</tt:Hour>
+                        <tt:Minute>{now.tm_min}</tt:Minute>
+                        <tt:Second>{now.tm_sec}</tt:Second>
+                    </tt:Time>
+                    <tt:Date>
+                        <tt:Year>{now.tm_year}</tt:Year>
+                        <tt:Month>{now.tm_mon}</tt:Month>
+                        <tt:Day>{now.tm_mday}</tt:Day>
+                    </tt:Date>
+                </tt:UTCDateTime>
+            </tds:SystemDateAndTime>
+        </tds:GetSystemDateAndTimeResponse>
+    </soap:Body>
+</soap:Envelope>"""
+            return self.send_soap_response(response)
+        except Exception as e:
+            logger.error(f"Error in handle_get_system_date_and_time: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get system date and time")
     
+    def handle_get_services(self):
+        """Handle GetServices SOAP request"""
+        try:
+            base_url = f"http://{self.camera_config.get('onvif_ip', '127.0.0.1')}:{self.camera_config.get('onvif_port', 80)}"
+            response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+    <soap:Body>
+        <tds:GetServicesResponse>
+            <tds:Service>
+                <tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace>
+                <tds:XAddr>{base_url}/onvif/device_service</tds:XAddr>
+                <tds:Version>
+                    <tds:Major>2</tds:Major>
+                    <tds:Minor>42</tds:Minor>
+                </tds:Version>
+            </tds:Service>
+            <tds:Service>
+                <tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace>
+                <tds:XAddr>{base_url}/onvif/media_service</tds:XAddr>
+                <tds:Version>
+                    <tds:Major>2</tds:Major>
+                    <tds:Minor>42</tds:Minor>
+                </tds:Version>
+            </tds:Service>
+        </tds:GetServicesResponse>
+    </soap:Body>
+</soap:Envelope>"""
+            return self.send_soap_response(response)
+        except Exception as e:
+            logger.error(f"Error in handle_get_services: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get services")
+    
+    def handle_get_service_capabilities(self):
+        """Handle GetServiceCapabilities (Device service) SOAP request"""
+        try:
+            response = """<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+    <soap:Body>
+        <tds:GetServiceCapabilitiesResponse>
+            <tds:Capabilities>
+                <tt:Network>
+                    <tt:IPFilter>false</tt:IPFilter>
+                    <tt:ZeroConfiguration>false</tt:ZeroConfiguration>
+                    <tt:IPVersion6>false</tt:IPVersion6>
+                </tt:Network>
+                <tt:System>
+                    <tt:DiscoveryResolve>false</tt:DiscoveryResolve>
+                    <tt:DiscoveryBye>false</tt:DiscoveryBye>
+                    <tt:RemoteDiscovery>false</tt:RemoteDiscovery>
+                    <tt:SystemBackup>false</tt:SystemBackup>
+                    <tt:SystemLogging>false</tt:SystemLogging>
+                    <tt:FirmwareUpgrade>false</tt:FirmwareUpgrade>
+                </tt:System>
+            </tds:Capabilities>
+        </tds:GetServiceCapabilitiesResponse>
+    </soap:Body>
+</soap:Envelope>"""
+            return self.send_soap_response(response)
+        except Exception as e:
+            logger.error(f"Error in handle_get_service_capabilities: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get service capabilities")
+    
+    def handle_get_video_sources(self):
+        """Handle GetVideoSources SOAP request"""
+        try:
+            vp = self._video_params()
+            response = """<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+    <soap:Body>
+        <trt:GetVideoSourcesResponse>
+            <trt:VideoSources>
+                <tt:VideoSource token="{video_source_token}">
+                    <tt:Framerate>{framerate}</tt:Framerate>
+                    <tt:Resolution>
+                        <tt:Width>{width}</tt:Width>
+                        <tt:Height>{height}</tt:Height>
+                    </tt:Resolution>
+                </tt:VideoSource>
+            </trt:VideoSources>
+        </trt:GetVideoSourcesResponse>
+    </soap:Body>
+</soap:Envelope>""".format(**vp)
+            return self.send_soap_response(response)
+        except Exception as e:
+            logger.error(f"Error in handle_get_video_sources: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get video sources")
+    
+    def handle_get_video_source_configurations(self):
+        """Handle GetVideoSourceConfigurations SOAP request"""
+        try:
+            vp = self._video_params()
+            response = """<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+    <soap:Body>
+        <trt:GetVideoSourceConfigurationsResponse>
+            <trt:Configurations token="{video_source_token}">
+                <tt:Name>{video_source_token}</tt:Name>
+                <tt:UseCount>1</tt:UseCount>
+            </trt:Configurations>
+        </trt:GetVideoSourceConfigurationsResponse>
+    </soap:Body>
+</soap:Envelope>""".format(**vp)
+            return self.send_soap_response(response)
+        except Exception as e:
+            logger.error(f"Error in handle_get_video_source_configurations: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get video source configurations")
+    
+    def handle_get_video_encoder_configurations(self):
+        """Handle GetVideoEncoderConfigurations SOAP request"""
+        try:
+            vp = self._video_params()
+            response = """<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+    <soap:Body>
+        <trt:GetVideoEncoderConfigurationsResponse>
+            <trt:Configurations token="{video_encoder_token}">
+                <tt:Name>{video_encoder_token}</tt:Name>
+                <tt:UseCount>1</tt:UseCount>
+                <tt:Encoding>{encoding}</tt:Encoding>
+                <tt:Resolution>
+                    <tt:Width>{width}</tt:Width>
+                    <tt:Height>{height}</tt:Height>
+                </tt:Resolution>
+                <tt:Quality>5</tt:Quality>
+                <tt:RateControl>
+                    <tt:FrameRateLimit>{framerate}</tt:FrameRateLimit>
+                    <tt:EncodingInterval>1</tt:EncodingInterval>
+                    <tt:BitrateLimit>{bitrate}</tt:BitrateLimit>
+                </tt:RateControl>
+            </trt:Configurations>
+        </trt:GetVideoEncoderConfigurationsResponse>
+    </soap:Body>
+</soap:Envelope>""".format(**vp)
+            return self.send_soap_response(response)
+        except Exception as e:
+            logger.error(f"Error in handle_get_video_encoder_configurations: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get video encoder configurations")
+    
+    def send_soap_response(self, response_xml: str):
+        """Send SOAP response with logging"""
+        try:
+            # Get request ID if available
+            request_id = getattr(self, 'request_id', 'unknown')
+            
+            # Log response summary
+            logger.info(f"[RES {request_id}] Sending SOAP response (length: {len(response_xml)} bytes)")
+            
+            # Send response
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/soap+xml; charset=utf-8')
+            self.send_header('Content-Length', str(len(response_xml)))
+            self.end_headers()
+            self.wfile.write(response_xml.encode())
+            
+            # Log first 200 chars of response for debugging
+            preview = response_xml[:200] + ('...' if len(response_xml) > 200 else '')
+            logger.debug(f"[RES {request_id}] Response preview: {preview}")
+            
+            return response_xml
+            
+        except Exception as e:
+            logger.error(f"[RES {request_id}] Error sending SOAP response: {str(e)}", exc_info=True)
+            raise
+    
+    def handle_get_audio_output_config_options(self):
+        """Handle GetAudioOutputConfigurationOptions SOAP request"""
+        try:
+            response = """<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tt="http://www.onvif.org/ver10/schema"
+               xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
+    <soap:Body>
+        <trt:GetAudioOutputConfigurationOptionsResponse>
+            <trt:Options>
+                <tt:OutputTokens>AudioOutput_1</tt:OutputTokens>
+                <tt:SendPrimacy>http://www.onvif.org/ver10/stream/flow/FullDuplex</tt:SendPrimacy>
+                <tt:OutputLevelRange>
+                    <tt:Min>-100</tt:Min>
+                    <tt:Max>6</tt:Max>
+                </tt:OutputLevelRange>
+            </trt:Options>
+        </trt:GetAudioOutputConfigurationOptionsResponse>
+    </soap:Body>
+</soap:Envelope>"""
+            return self.send_soap_response(response)
+            
+        except Exception as e:
+            logger.error(f"Error in handle_get_audio_output_config_options: {str(e)}", exc_info=True)
+            return self.send_soap_fault("Failed to get audio output configuration options")
+
     def send_soap_fault(self, fault_string: str):
-        """Send SOAP fault response"""
-        fault_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+        """Send SOAP fault response with logging"""
+        try:
+            # Get request ID if available
+            request_id = getattr(self, 'request_id', 'unknown')
+            
+            # Log the fault
+            logger.warning(f"[REQ {request_id}] Sending SOAP fault: {fault_string}")
+            
+            # Create fault response
+            response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
     <soap:Body>
         <soap:Fault>
             <soap:Code>
-                <soap:Value>soap:Receiver</soap:Value>
+                <soap:Value>soap:Sender</soap:Value>
+                <soap:Subcode>
+                    <soap:Value>ter:NotAuthorized</soap:Value>
+                </soap:Subcode>
             </soap:Code>
             <soap:Reason>
-                <soap:Text>{fault_string}</soap:Text>
+                <soap:Text xml:lang="en">{fault_string}</soap:Text>
             </soap:Reason>
         </soap:Fault>
     </soap:Body>
 </soap:Envelope>"""
-        
-        self.send_response(500)
-        self.send_header('Content-Type', 'application/soap+xml; charset=utf-8')
-        self.send_header('Content-Length', str(len(fault_response)))
-        self.end_headers()
-        self.wfile.write(fault_response.encode())
+            
+            # Send response
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/soap+xml')
+            self.end_headers()
+            self.wfile.write(response.encode())
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"[REQ {request_id}] Error sending SOAP fault: {str(e)}", exc_info=True)
+            raise
 
 
 class ONVIFProxyServer:
@@ -240,7 +720,7 @@ class ONVIFProxyServer:
     def start(self) -> bool:
         """Start the ONVIF proxy server"""
         try:
-            ip = self.camera_config.get('onvif_ip', '127.0.0.1')
+            ip = self.camera_config.get('onvif_ip') or '127.0.0.1'
             port = self.camera_config.get('onvif_port', 80)
             
             # Create handler with camera config

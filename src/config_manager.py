@@ -6,6 +6,8 @@ Handles XML configuration file operations
 
 import xml.etree.ElementTree as ET
 import os
+import io
+import tempfile
 from typing import Dict, List, Optional
 
 class ConfigManager:
@@ -14,6 +16,16 @@ class ConfigManager:
         self.tree = None
         self.root = None
         self.load_config()
+    
+    def reload_config(self):
+        """Reload configuration from file to get latest changes"""
+        try:
+            self.tree = ET.parse(self.config_path)
+            self.root = self.tree.getroot()
+        except FileNotFoundError:
+            self.create_default_config()
+        except ET.ParseError as e:
+            raise Exception(f"Invalid XML configuration: {e}")
     
     def _parse_bool(self, value) -> bool:
         """Parse various truthy/falsey string representations to boolean.
@@ -47,6 +59,14 @@ class ConfigManager:
         ET.SubElement(system, "pushover_token").text = ""
         ET.SubElement(system, "pushover_user").text = ""
         ET.SubElement(system, "web_port").text = "8080"
+        ET.SubElement(system, "notify_camera_offline").text = "true"
+        ET.SubElement(system, "notify_camera_offline_priority").text = "0"
+        ET.SubElement(system, "notify_camera_online").text = "true"
+        ET.SubElement(system, "notify_camera_online_priority").text = "0"
+        ET.SubElement(system, "notify_system_error").text = "true"
+        ET.SubElement(system, "notify_system_error_priority").text = "1"
+        ET.SubElement(system, "notify_service_restart").text = "false"
+        ET.SubElement(system, "notify_service_restart_priority").text = "0"
         
         # Cameras section
         ET.SubElement(self.root, "cameras")
@@ -56,8 +76,46 @@ class ConfigManager:
     
     def save_config(self):
         """Save configuration to XML file"""
-        ET.indent(self.tree, space="    ")
-        self.tree.write(self.config_path, encoding="UTF-8", xml_declaration=True)
+        # Reload the tree from the current root to ensure we have the latest structure
+        self.tree = ET.ElementTree(self.root)
+        try:
+            ET.indent(self.tree, space="    ")
+        except Exception:
+            # Older Python versions may not support ET.indent
+            pass
+
+        # Serialize XML to bytes
+        buf = io.BytesIO()
+        self.tree.write(buf, encoding="UTF-8", xml_declaration=True)
+        data = buf.getvalue()
+
+        # Atomic write with fsync to ensure durability
+        dirpath = os.path.dirname(self.config_path) or "."
+        fd, tmppath = tempfile.mkstemp(prefix=".config.xml.", dir=dirpath)
+        try:
+            with os.fdopen(fd, 'wb') as tmp:
+                tmp.write(data)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmppath, self.config_path)
+            # fsync directory to persist rename
+            try:
+                dir_fd = os.open(dirpath, os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception:
+                # Best effort on directory fsync
+                pass
+        except Exception:
+            # Cleanup temp file if present
+            try:
+                if os.path.exists(tmppath):
+                    os.unlink(tmppath)
+            except Exception:
+                pass
+            raise
     
     def get_system_config(self) -> Dict:
         """Get system configuration"""
@@ -71,11 +129,22 @@ class ConfigManager:
             "base_ip_range": system.find("base_ip_range").text,
             "pushover_token": system.find("pushover_token").text or "",
             "pushover_user": system.find("pushover_user").text or "",
-            "web_port": int(system.find("web_port").text or 8080)
+            "web_port": int(system.find("web_port").text or 8080),
+            "notify_camera_offline": self._parse_bool(system.find("notify_camera_offline").text if system.find("notify_camera_offline") is not None else "true"),
+            "notify_camera_offline_priority": int(system.find("notify_camera_offline_priority").text) if system.find("notify_camera_offline_priority") is not None and system.find("notify_camera_offline_priority").text else 0,
+            "notify_camera_online": self._parse_bool(system.find("notify_camera_online").text if system.find("notify_camera_online") is not None else "true"),
+            "notify_camera_online_priority": int(system.find("notify_camera_online_priority").text) if system.find("notify_camera_online_priority") is not None and system.find("notify_camera_online_priority").text else 0,
+            "notify_system_error": self._parse_bool(system.find("notify_system_error").text if system.find("notify_system_error") is not None else "true"),
+            "notify_system_error_priority": int(system.find("notify_system_error_priority").text) if system.find("notify_system_error_priority") is not None and system.find("notify_system_error_priority").text else 1,
+            "notify_service_restart": self._parse_bool(system.find("notify_service_restart").text if system.find("notify_service_restart") is not None else "false"),
+            "notify_service_restart_priority": int(system.find("notify_service_restart_priority").text) if system.find("notify_service_restart_priority") is not None and system.find("notify_service_restart_priority").text else 0
         }
     
     def update_system_config(self, config: Dict):
         """Update system configuration"""
+        # Reload config first to ensure we have the latest data including cameras
+        self.reload_config()
+        
         system = self.root.find("system")
         if system is None:
             system = ET.SubElement(self.root, "system")
@@ -104,19 +173,16 @@ class ConfigManager:
                 "rtsp_username": camera.find("rtsp_username").text if camera.find("rtsp_username") is not None else "",
                 "rtsp_password": camera.find("rtsp_password").text if camera.find("rtsp_password") is not None else "",
                 "resolution": camera.find("resolution").text if camera.find("resolution") is not None else "",
-                "fps": int(camera.find("fps").text) if camera.find("fps") is not None and camera.find("fps").text and camera.find("fps").text != "None" else None,
-                "bitrate_kbps": int(camera.find("bitrate_kbps").text) if camera.find("bitrate_kbps") is not None and camera.find("bitrate_kbps").text and camera.find("bitrate_kbps").text != "None" else None,
+                "fps": int(float(camera.find("fps").text)) if camera.find("fps") is not None and camera.find("fps").text and camera.find("fps").text != "None" else None,
+                "bitrate_kbps": int(float(camera.find("bitrate_kbps").text)) if camera.find("bitrate_kbps") is not None and camera.find("bitrate_kbps").text and camera.find("bitrate_kbps").text != "None" else None,
                 "onvif_ip": camera.find("onvif_ip").text if camera.find("onvif_ip") is not None else "",
                 "onvif_port": int(camera.find("onvif_port").text) if camera.find("onvif_port") is not None else 80,
-                "mac_address": camera.find("mac_address").text if camera.find("mac_address") is not None else "",
                 "last_ping_status": camera.find("last_ping_status").text if camera.find("last_ping_status") is not None else "unknown",
                 "notifications_enabled": self._parse_bool(camera.find("notifications_enabled").text if camera.find("notifications_enabled") is not None else True),
                 "use_dhcp": self._parse_bool(camera.find("use_dhcp").text if camera.find("use_dhcp") is not None else False),
                 "base_interface": camera.find("base_interface").text if camera.find("base_interface") is not None else None,
-                'onvif_ip': camera.find('onvif_ip').text or '',
-                'onvif_port': int(camera.find('onvif_port').text or 80),
-                'onvif_mac': camera.find('onvif_mac').text or '',
-                'onvif_interface': camera.find('onvif_interface').text or f'onvif-{camera.get("id")}'
+                'onvif_mac': (camera.find('onvif_mac').text if camera.find('onvif_mac') is not None and camera.find('onvif_mac').text else (camera.find('mac_address').text if camera.find('mac_address') is not None and camera.find('mac_address').text else '')),
+                'onvif_interface': (camera.find('onvif_interface').text if camera.find('onvif_interface') is not None and camera.find('onvif_interface').text else f'onvif-{camera.get("id")}')
             }
             cameras.append(camera_config)
         

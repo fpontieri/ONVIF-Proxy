@@ -1,0 +1,302 @@
+{% extends "base.html" %}
+
+{% block title %}Traffic Monitor - {{ camera.name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h2>
+                    <i class="fas fa-chart-line"></i>
+                    Traffic Monitor - {{ camera.name }}
+                </h2>
+                <div>
+                    <a href="{{ url_for('cameras') }}" class="btn btn-secondary">
+                        <i class="fas fa-arrow-left"></i> Back to Cameras
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Current Stats -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5><i class="fas fa-tachometer-alt"></i> Current Traffic Statistics</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row" id="current-stats">
+                        <div class="col-md-3">
+                            <div class="stat-box text-center">
+                                <h6>RX Rate</h6>
+                                <span id="rx-rate" class="stat-value">--</span>
+                                <small class="text-muted">bytes/sec</small>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="stat-box text-center">
+                                <h6>TX Rate</h6>
+                                <span id="tx-rate" class="stat-value">--</span>
+                                <small class="text-muted">bytes/sec</small>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="stat-box text-center">
+                                <h6>Total Packets RX</h6>
+                                <span id="total-rx-packets" class="stat-value">--</span>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="stat-box text-center">
+                                <h6>Total Packets TX</h6>
+                                <span id="total-tx-packets" class="stat-value">--</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Traffic Graphs -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-chart-area"></i> Traffic Graphs</h5>
+                        <div class="btn-group" role="group">
+                            <button type="button" class="btn btn-outline-primary active" data-range="-1h">1 Hour</button>
+                            <button type="button" class="btn btn-outline-primary" data-range="-6h">6 Hours</button>
+                            <button type="button" class="btn btn-outline-primary" data-range="-1d">1 Day</button>
+                            <button type="button" class="btn btn-outline-primary" data-range="-1w">1 Week</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="text-center" id="graph-loading">
+                        <div class="spinner-border" role="status">
+                            <span class="sr-only">Loading...</span>
+                        </div>
+                        <p class="mt-2">Loading traffic graph...</p>
+                    </div>
+                    <div id="graph-container" style="display: none;">
+                        <img id="traffic-graph" class="img-fluid" alt="Traffic Graph" />
+                    </div>
+                    <div id="graph-error" class="alert alert-warning" style="display: none;">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        Unable to load traffic graph. This may be because:
+                        <ul class="mb-0 mt-2">
+                            <li>Traffic monitoring is not yet initialized</li>
+                            <li>No traffic data is available for this camera</li>
+                            <li>RRD tools are not installed</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Real-time Chart -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5><i class="fas fa-chart-line"></i> Real-time Traffic (Last 5 Minutes)</h5>
+                </div>
+                <div class="card-body">
+                    <canvas id="realtime-chart" width="800" height="400"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.stat-box {
+    padding: 15px;
+    border: 1px solid #dee2e6;
+    border-radius: 5px;
+    margin-bottom: 10px;
+}
+
+.stat-value {
+    font-size: 1.5em;
+    font-weight: bold;
+    color: #007bff;
+    display: block;
+}
+
+#traffic-graph {
+    max-width: 100%;
+    height: auto;
+}
+
+.btn-group .btn.active {
+    background-color: #007bff;
+    color: white;
+}
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+<script>
+let currentRange = '-1h';
+let realtimeChart;
+let realtimeData = {
+    labels: [],
+    datasets: [{
+        label: 'RX (bytes/sec)',
+        data: [],
+        borderColor: 'rgb(75, 192, 192)',
+        backgroundColor: 'rgba(75, 192, 192, 0.2)',
+        tension: 0.1
+    }, {
+        label: 'TX (bytes/sec)',
+        data: [],
+        borderColor: 'rgb(255, 99, 132)',
+        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+        tension: 0.1
+    }]
+};
+
+// Initialize real-time chart
+function initRealtimeChart() {
+    const ctx = document.getElementById('realtime-chart').getContext('2d');
+    realtimeChart = new Chart(ctx, {
+        type: 'line',
+        data: realtimeData,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    type: 'time',
+                    time: {
+                        unit: 'second',
+                        displayFormats: {
+                            second: 'HH:mm:ss'
+                        }
+                    }
+                },
+                y: {
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: 'Bytes per Second'
+                    }
+                }
+            },
+            plugins: {
+                legend: {
+                    display: true
+                }
+            }
+        }
+    });
+}
+
+// Load traffic graph
+function loadTrafficGraph(range = '-1h') {
+    currentRange = range;
+    
+    document.getElementById('graph-loading').style.display = 'block';
+    document.getElementById('graph-container').style.display = 'none';
+    document.getElementById('graph-error').style.display = 'none';
+    
+    const graphUrl = `/api/camera/{{ camera.id }}/traffic/graph?range=${range}&width=800&height=400&t=${Date.now()}`;
+    
+    fetch(graphUrl)
+        .then(response => {
+            if (response.ok) {
+                return response.blob();
+            } else {
+                throw new Error('Failed to load graph');
+            }
+        })
+        .then(blob => {
+            const imageUrl = URL.createObjectURL(blob);
+            document.getElementById('traffic-graph').src = imageUrl;
+            document.getElementById('graph-loading').style.display = 'none';
+            document.getElementById('graph-container').style.display = 'block';
+        })
+        .catch(error => {
+            console.error('Error loading graph:', error);
+            document.getElementById('graph-loading').style.display = 'none';
+            document.getElementById('graph-error').style.display = 'block';
+        });
+}
+
+// Update current statistics
+function updateCurrentStats() {
+    fetch(`/api/camera/{{ camera.id }}/traffic/current`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.rates) {
+                document.getElementById('rx-rate').textContent = formatBytes(data.rates.rx_bytes_per_sec || 0);
+                document.getElementById('tx-rate').textContent = formatBytes(data.rates.tx_bytes_per_sec || 0);
+                document.getElementById('total-rx-packets').textContent = (data.stats.rx_packets || 0).toLocaleString();
+                document.getElementById('total-tx-packets').textContent = (data.stats.tx_packets || 0).toLocaleString();
+                
+                // Update real-time chart
+                const now = new Date();
+                realtimeData.labels.push(now);
+                realtimeData.datasets[0].data.push(data.rates.rx_bytes_per_sec || 0);
+                realtimeData.datasets[1].data.push(data.rates.tx_bytes_per_sec || 0);
+                
+                // Keep only last 60 data points (5 minutes at 5-second intervals)
+                if (realtimeData.labels.length > 60) {
+                    realtimeData.labels.shift();
+                    realtimeData.datasets[0].data.shift();
+                    realtimeData.datasets[1].data.shift();
+                }
+                
+                realtimeChart.update('none');
+            }
+        })
+        .catch(error => {
+            console.error('Error updating stats:', error);
+        });
+}
+
+// Format bytes for display
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Event listeners
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize chart
+    initRealtimeChart();
+    
+    // Load initial graph
+    loadTrafficGraph();
+    
+    // Update stats immediately and then every 5 seconds
+    updateCurrentStats();
+    setInterval(updateCurrentStats, 5000);
+    
+    // Reload graph every 60 seconds
+    setInterval(() => loadTrafficGraph(currentRange), 60000);
+    
+    // Range button handlers
+    document.querySelectorAll('[data-range]').forEach(button => {
+        button.addEventListener('click', function() {
+            // Update active button
+            document.querySelectorAll('[data-range]').forEach(btn => btn.classList.remove('active'));
+            this.classList.add('active');
+            
+            // Load new graph
+            loadTrafficGraph(this.dataset.range);
+        });
+    });
+});
+</script>
+{% endblock %}

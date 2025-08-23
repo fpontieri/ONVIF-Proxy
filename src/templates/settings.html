@@ -5,13 +5,6 @@
 {% block content %}
 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
     <h1 class="h2">System Settings</h1>
-    <div class="btn-toolbar mb-2 mb-md-0">
-        <div class="btn-group me-2">
-            <button type="button" class="btn btn-outline-primary" onclick="testNotification()">
-                <i class="fas fa-bell"></i> Test Notification
-            </button>
-        </div>
-    </div>
 </div>
 
 <div class="row">
@@ -74,6 +67,16 @@
                         <div class="form-text">Starting IP address for virtual camera interfaces (e.g., 192.168.1.100)</div>
                         <div id="ip-suggestions" class="mt-2"></div>
                     </div>
+
+                    <div class="mb-3">
+                        <label for="ping_interval" class="form-label">Camera Ping Interval</label>
+                        <div class="input-group">
+                            <input type="number" class="form-control" id="ping_interval" name="ping_interval" 
+                                   value="{{ system_config.ping_interval or 30 }}" min="10" max="300" required>
+                            <span class="input-group-text">seconds</span>
+                        </div>
+                        <div class="form-text">How often the watchdog should ping each camera (3 pings per interval)</div>
+                    </div>
                 </div>
             </div>
 
@@ -96,7 +99,7 @@
                             <div class="mb-3">
                                 <label for="pushover_token" class="form-label">API Token</label>
                                 <input type="text" class="form-control" id="pushover_token" name="pushover_token" 
-                                       value="{{ system_config.pushover_token }}" 
+                                       value="{{ system_config.pushover_token or '' }}" 
                                        placeholder="Your application API token">
                                 <div class="form-text">Application API token from Pushover</div>
                             </div>
@@ -105,17 +108,105 @@
                             <div class="mb-3">
                                 <label for="pushover_user" class="form-label">User Key</label>
                                 <input type="text" class="form-control" id="pushover_user" name="pushover_user" 
-                                       value="{{ system_config.pushover_user }}" 
+                                       value="{{ system_config.pushover_user or '' }}" 
                                        placeholder="Your user key">
                                 <div class="form-text">Your user key from Pushover</div>
                             </div>
                         </div>
                     </div>
 
+                    <div class="mb-3">
+                        <button type="button" class="btn btn-outline-primary" onclick="testNotification()">
+                            <i class="fas fa-bell"></i> Test Notification
+                        </button>
+                    </div>
+
+                    <!-- Notification Events Configuration -->
+                    <div class="row">
+                        <div class="col-12">
+                            <h6 class="mb-3">Notification Events</h6>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="notify_camera_offline" name="notify_camera_offline" 
+                                                   {{ 'checked' if system_config.notify_camera_offline }}>
+                                            <label class="form-check-label" for="notify_camera_offline">
+                                                Camera Offline
+                                            </label>
+                                        </div>
+                                        <select class="form-select form-select-sm mt-1" name="notify_camera_offline_priority">
+                                            <option value="-2" {{ 'selected' if system_config.notify_camera_offline_priority == -2 }}>Silent</option>
+                                            <option value="-1" {{ 'selected' if system_config.notify_camera_offline_priority == -1 }}>Quiet</option>
+                                            <option value="0" {{ 'selected' if system_config.notify_camera_offline_priority == 0 or not system_config.notify_camera_offline_priority }}>Normal</option>
+                                            <option value="1" {{ 'selected' if system_config.notify_camera_offline_priority == 1 }}>High</option>
+                                            <option value="2" {{ 'selected' if system_config.notify_camera_offline_priority == 2 }}>Emergency</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="notify_camera_online" name="notify_camera_online" 
+                                                   {{ 'checked' if system_config.notify_camera_online }}>
+                                            <label class="form-check-label" for="notify_camera_online">
+                                                Camera Online
+                                            </label>
+                                        </div>
+                                        <select class="form-select form-select-sm mt-1" name="notify_camera_online_priority">
+                                            <option value="-2" {{ 'selected' if system_config.notify_camera_online_priority == -2 }}>Silent</option>
+                                            <option value="-1" {{ 'selected' if system_config.notify_camera_online_priority == -1 }}>Quiet</option>
+                                            <option value="0" {{ 'selected' if system_config.notify_camera_online_priority == 0 or not system_config.notify_camera_online_priority }}>Normal</option>
+                                            <option value="1" {{ 'selected' if system_config.notify_camera_online_priority == 1 }}>High</option>
+                                            <option value="2" {{ 'selected' if system_config.notify_camera_online_priority == 2 }}>Emergency</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="notify_system_error" name="notify_system_error" 
+                                                   {{ 'checked' if system_config.notify_system_error }}>
+                                            <label class="form-check-label" for="notify_system_error">
+                                                System Errors
+                                            </label>
+                                        </div>
+                                        <select class="form-select form-select-sm mt-1" name="notify_system_error_priority">
+                                            <option value="-2" {{ 'selected' if system_config.notify_system_error_priority == -2 }}>Silent</option>
+                                            <option value="-1" {{ 'selected' if system_config.notify_system_error_priority == -1 }}>Quiet</option>
+                                            <option value="0" {{ 'selected' if system_config.notify_system_error_priority == 0 or not system_config.notify_system_error_priority }}>Normal</option>
+                                            <option value="1" {{ 'selected' if system_config.notify_system_error_priority == 1 }}>High</option>
+                                            <option value="2" {{ 'selected' if system_config.notify_system_error_priority == 2 }}>Emergency</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="notify_service_restart" name="notify_service_restart" 
+                                                   {{ 'checked' if system_config.notify_service_restart }}>
+                                            <label class="form-check-label" for="notify_service_restart">
+                                                Service Restart
+                                            </label>
+                                        </div>
+                                        <select class="form-select form-select-sm mt-1" name="notify_service_restart_priority">
+                                            <option value="-2" {{ 'selected' if system_config.notify_service_restart_priority == -2 }}>Silent</option>
+                                            <option value="-1" {{ 'selected' if system_config.notify_service_restart_priority == -1 }}>Quiet</option>
+                                            <option value="0" {{ 'selected' if system_config.notify_service_restart_priority == 0 or not system_config.notify_service_restart_priority }}>Normal</option>
+                                            <option value="1" {{ 'selected' if system_config.notify_service_restart_priority == 1 }}>High</option>
+                                            <option value="2" {{ 'selected' if system_config.notify_service_restart_priority == 2 }}>Emergency</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="alert alert-warning">
                         <i class="fas fa-exclamation-triangle"></i>
-                        <strong>Note:</strong> Notifications will be sent when cameras go online/offline and for system events. 
-                        Each notification includes ping test results.
+                        <strong>Priority Levels:</strong> Silent (no notification), Quiet (no sound), Normal (default), High (bypass quiet hours), Emergency (repeat until acknowledged)
                     </div>
                 </div>
             </div>

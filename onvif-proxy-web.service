@@ -1,6 +1,6 @@
 [Unit]
 Description=ONVIF Proxy Web Interface
-Documentation=https://github.com/your-repo/onvif-proxy
+Documentation=https://github.com/fpontieri/ONVIF-Proxy
 After=network.target
 Wants=network.target
 
@@ -17,11 +17,11 @@ StandardError=journal
 SyslogIdentifier=onvif-proxy-web
 
 # Security settings
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
 ReadWritePaths=/opt/onvif-proxy /var/log /var/lib/onvif-proxy /run/onvif-proxy
-PrivateTmp=true
+PrivateTmp=false
 
 [Install]
 WantedBy=multi-user.target

@@ -13,6 +13,7 @@ import sys
 from datetime import datetime, timedelta
 from config_manager import ConfigManager
 from notification_manager import NotificationManager
+from traffic_monitor import TrafficMonitor
 
 class ONVIFProxyWatchdog:
     """Watchdog service to monitor ONVIF Proxy system health"""
@@ -20,10 +21,12 @@ class ONVIFProxyWatchdog:
     def __init__(self, config_path: str = "config.xml"):
         self.config_manager = ConfigManager(config_path)
         self.notification_manager = NotificationManager()
+        self.traffic_monitor = TrafficMonitor()
         self.running = False
         self.last_notification = {}
-        self.check_interval = 60  # Check every 60 seconds
         self.notification_cooldown = 300  # 5 minutes between notifications
+        self.camera_ping_results = {}  # Store ping results for cameras
+        self.camera_traffic_alerts = {}  # Store last traffic alert times
         
         # Setup logging - use systemd journal instead of file
         logging.basicConfig(
@@ -58,19 +61,31 @@ class ONVIFProxyWatchdog:
         
         self.running = True
         
+        # Start traffic monitoring
+        self.traffic_monitor.start_monitoring()
+        self._initialize_camera_monitoring()
+        
         # Main monitoring loop
         while self.running:
             try:
+                # Get current ping interval from system config
+                system_config = self.config_manager.get_system_config()
+                ping_interval = system_config.get('ping_interval', 30)
+                
                 self._check_system_health()
-                time.sleep(self.check_interval)
+                self._ping_cameras()
+                self._check_traffic_health()
+                
+                time.sleep(ping_interval)
             except Exception as e:
                 self.logger.error(f"Error in watchdog loop: {e}")
-                time.sleep(self.check_interval)
+                time.sleep(30)  # Default fallback interval
     
     def stop(self):
         """Stop the watchdog service"""
         self.logger.info("Stopping ONVIF Proxy Watchdog")
         self.running = False
+        self.traffic_monitor.stop_monitoring()
     
     def _check_system_health(self):
         """Check overall system health"""
@@ -174,6 +189,136 @@ class ONVIFProxyWatchdog:
         
         return issues
     
+    def _ping_cameras(self):
+        """Ping all enabled cameras and update their status"""
+        try:
+            cameras = self.config_manager.get_cameras()
+            
+            for camera in cameras:
+                if not camera.get('enabled', True):
+                    continue
+                
+                camera_id = camera['id']
+                onvif_ip = camera.get('onvif_ip')
+                
+                if not onvif_ip:
+                    continue
+                
+                # Send 3 pings to the camera
+                ping_results = self._ping_host(onvif_ip, count=3)
+                
+                # Store results
+                self.camera_ping_results[camera_id] = ping_results
+                
+                # Update camera config with ping status
+                new_status = 'up' if ping_results['success'] else 'down'
+                previous_status = camera.get('last_ping_status', 'unknown')
+                
+                if new_status != previous_status:
+                    self.logger.info(f"Camera {camera.get('name', camera_id)} status changed: {previous_status} -> {new_status}")
+                    
+                    # Update camera config
+                    camera_config = dict(camera)
+                    camera_config['last_ping_status'] = new_status
+                    camera_config['last_ping_time'] = datetime.now().isoformat()
+                    camera_config['last_ping_results'] = ping_results
+                    self.config_manager.update_camera(camera_id, camera_config)
+                    
+                    # Send notification for status change
+                    self._send_camera_status_notification(camera, previous_status, new_status, ping_results)
+                
+        except Exception as e:
+            self.logger.error(f"Error pinging cameras: {e}")
+    
+    def _ping_host(self, host: str, count: int = 3) -> dict:
+        """Ping a host and return results"""
+        try:
+            import subprocess
+            import re
+            
+            # Run ping command
+            cmd = ['ping', '-c', str(count), '-W', '3', host]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            
+            if result.returncode == 0:
+                # Parse ping output for statistics
+                output = result.stdout
+                
+                # Extract packet loss
+                loss_match = re.search(r'(\d+)% packet loss', output)
+                packet_loss = loss_match.group(1) + '%' if loss_match else '0%'
+                
+                # Extract average time
+                time_match = re.search(r'rtt min/avg/max/mdev = [\d.]+/([\d.]+)/[\d.]+/[\d.]+ ms', output)
+                avg_time = time_match.group(1) + 'ms' if time_match else '0ms'
+                
+                return {
+                    "host": host,
+                    "success": True,
+                    "output": output,
+                    "error": "",
+                    "packet_loss": packet_loss,
+                    "avg_time": avg_time
+                }
+            else:
+                return {
+                    "host": host,
+                    "success": False,
+                    "output": result.stdout,
+                    "error": result.stderr,
+                    "packet_loss": "100%",
+                    "avg_time": "0ms"
+                }
+        except Exception as e:
+            return {
+                "host": host,
+                "success": False,
+                "output": "",
+                "error": str(e),
+                "packet_loss": "100%",
+                "avg_time": "0ms"
+            }
+    
+    def _send_camera_status_notification(self, camera: dict, old_status: str, new_status: str, ping_results: dict):
+        """Send notification for camera status change"""
+        try:
+            system_config = self.config_manager.get_system_config()
+            
+            if not system_config.get('pushover_token') or not system_config.get('pushover_user'):
+                return
+            
+            camera_name = camera.get('name', f"Camera {camera['id']}")
+            
+            if new_status == 'up' and system_config.get('notify_camera_online'):
+                title = "📹 Camera Online"
+                message = f"""Camera '{camera_name}' is now online.
+
+IP: {camera.get('onvif_ip', 'Unknown')}
+Packet Loss: {ping_results.get('packet_loss', 'Unknown')}
+Avg Response: {ping_results.get('avg_time', 'Unknown')}
+
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+                
+                priority = system_config.get('notify_camera_online_priority', 0)
+                self.notification_manager.send_notification(title, message, priority=priority)
+                
+            elif new_status == 'down' and system_config.get('notify_camera_offline'):
+                title = "🚨 Camera Offline"
+                message = f"""Camera '{camera_name}' is offline!
+
+IP: {camera.get('onvif_ip', 'Unknown')}
+Error: {ping_results.get('error', 'Network unreachable')}
+
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Please check the camera and network connection."""
+                
+                priority = system_config.get('notify_camera_offline_priority', 1)
+                self.notification_manager.send_notification(title, message, priority=priority)
+                
+        except Exception as e:
+            self.logger.error(f"Failed to send camera status notification: {e}")
+    
     def _check_camera_connectivity(self) -> list:
         """Check camera connectivity issues"""
         issues = []
@@ -273,6 +418,110 @@ Please check the system status and logs for more details."""
         except Exception as e:
             self.logger.error(f"Error restarting service {service_name}: {e}")
             return False
+
+    def _initialize_camera_monitoring(self):
+        """Initialize traffic monitoring for all cameras"""
+        try:
+            cameras = self.config_manager.get_cameras()
+            for camera in cameras:
+                if camera.get('enabled', True):
+                    camera_id = camera['id']
+                    virtual_ip = camera.get('onvif_ip')
+                    camera_ip = self._extract_camera_ip(camera.get('rtsp_url', ''))
+                    
+                    if virtual_ip and camera_ip:
+                        self.traffic_monitor.add_camera(camera_id, virtual_ip, camera_ip)
+                        self.logger.info(f"Added camera {camera_id} to traffic monitoring: {virtual_ip} -> {camera_ip}")
+                        
+        except Exception as e:
+            self.logger.error(f"Error initializing camera monitoring: {e}")
+    
+    def _extract_camera_ip(self, rtsp_url: str) -> str:
+        """Extract camera IP from RTSP URL"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(rtsp_url)
+            return parsed.hostname
+        except Exception:
+            return None
+    
+    def _check_traffic_health(self):
+        """Check RTSP traffic health for all cameras"""
+        try:
+            cameras = self.config_manager.get_cameras()
+            current_time = time.time()
+            
+            for camera in cameras:
+                if not camera.get('enabled', True):
+                    continue
+                    
+                camera_id = camera['id']
+                camera_name = camera.get('name', f'Camera {camera_id}')
+                
+                # Check if camera has recent traffic (within last 60 seconds)
+                has_traffic = self.traffic_monitor.has_recent_traffic(camera_id, threshold_seconds=60)
+                
+                if not has_traffic:
+                    # Check if we've already sent an alert recently
+                    last_alert_time = self.camera_traffic_alerts.get(camera_id, 0)
+                    
+                    if current_time - last_alert_time > self.notification_cooldown:
+                        self._send_traffic_alert(camera_id, camera_name)
+                        self.camera_traffic_alerts[camera_id] = current_time
+                else:
+                    # Clear alert state if traffic is restored
+                    if camera_id in self.camera_traffic_alerts:
+                        del self.camera_traffic_alerts[camera_id]
+                        self._send_traffic_restored_alert(camera_id, camera_name)
+                        
+        except Exception as e:
+            self.logger.error(f"Error checking traffic health: {e}")
+    
+    def _send_traffic_alert(self, camera_id: str, camera_name: str):
+        """Send alert for no RTSP traffic"""
+        try:
+            message = f"🚨 No RTSP traffic detected for {camera_name} (ID: {camera_id}) in the last minute"
+            
+            system_config = self.config_manager.get_system_config()
+            if system_config.get('notify_system_error', True):
+                priority = system_config.get('notify_system_error_priority', 1)
+                
+                success = self.notification_manager.send_notification(
+                    title="ONVIF Proxy - No Traffic Alert",
+                    message=message,
+                    priority=priority
+                )
+                
+                if success:
+                    self.logger.warning(f"Sent no traffic alert for camera {camera_id}")
+                else:
+                    self.logger.error(f"Failed to send no traffic alert for camera {camera_id}")
+                    
+        except Exception as e:
+            self.logger.error(f"Error sending traffic alert for camera {camera_id}: {e}")
+    
+    def _send_traffic_restored_alert(self, camera_id: str, camera_name: str):
+        """Send alert when RTSP traffic is restored"""
+        try:
+            message = f"✅ RTSP traffic restored for {camera_name} (ID: {camera_id})"
+            
+            system_config = self.config_manager.get_system_config()
+            if system_config.get('notify_camera_online', True):
+                priority = system_config.get('notify_camera_online_priority', 0)
+                
+                success = self.notification_manager.send_notification(
+                    title="ONVIF Proxy - Traffic Restored",
+                    message=message,
+                    priority=priority
+                )
+                
+                if success:
+                    self.logger.info(f"Sent traffic restored alert for camera {camera_id}")
+                else:
+                    self.logger.error(f"Failed to send traffic restored alert for camera {camera_id}")
+                    
+        except Exception as e:
+            self.logger.error(f"Error sending traffic restored alert for camera {camera_id}: {e}")
 
 
 def main():
