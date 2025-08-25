@@ -692,3 +692,6 @@ except Exception as e:
 
 # Run main function
 main "$@"
+
+chown onvif-proxy:onvif-proxy "/var/lib/onvif-proxy/config.xml"
+

@@ -24,7 +24,7 @@ from src.traffic_monitor import TrafficMonitor
 from urllib.parse import urlparse
 
 app = Flask(__name__)
-app.version = "v2.0.55 - 2025-08-25 14:45 - Fix: import os in network_manager.get_available_interfaces()"
+app.version = "v2.0.57 - 2025-08-25 16:07"
 app.secret_key = os.urandom(24)
 app.debug = True
 
@@ -1476,8 +1476,16 @@ def api_camera_traffic_current(camera_id):
             'tx_packets': tx_packets,
         }
 
+        # Frontend (traffic.html) expects top-level rx/tx fields; also include nested 'stats' for compatibility
         return jsonify({
             'success': True,
+            'timestamp': now,
+            'rx_bytes': rx_bytes,
+            'tx_bytes': tx_bytes,
+            'rx_packets': rx_packets,
+            'tx_packets': tx_packets,
+            'virtual_ip': virtual_ip,
+            'rates': rates,
             'stats': {
                 'timestamp': now,
                 'rx_bytes': rx_bytes,
@@ -1485,8 +1493,7 @@ def api_camera_traffic_current(camera_id):
                 'rx_packets': rx_packets,
                 'tx_packets': tx_packets,
                 'virtual_ip': virtual_ip
-            },
-            'rates': rates
+            }
         })
         
     except Exception as e:

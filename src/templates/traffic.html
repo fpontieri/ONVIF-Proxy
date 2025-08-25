@@ -130,19 +130,6 @@
         </div>
     </div>
 
-    <!-- Real-time Chart -->
-    <div class="row mt-4">
-        <div class="col-12">
-            <div class="card">
-                <div class="card-header">
-                    <h5><i class="fas fa-chart-line"></i> Real-time Traffic (Last 5 Minutes)</h5>
-                </div>
-                <div class="card-body">
-                    <canvas id="realtime-chart" width="800" height="400"></canvas>
-                </div>
-            </div>
-        </div>
-    </div>
 </div>
 
 <style>
@@ -224,13 +211,7 @@ function initRealtimeChart() {
             },
             scales: {
                 x: {
-                    type: 'realtime',
-                    realtime: {
-                        duration: 60000, // Show 60 seconds of data
-                        refresh: 1000,   // Update every second
-                        delay: 100,      // Small delay for smoother updates
-                        onRefresh: updateRealtimeData
-                    },
+                    type: 'time',
                     time: {
                         displayFormats: {
                             second: 'HH:mm:ss'
@@ -266,7 +247,7 @@ function initRealtimeChart() {
 }
 
 // Update real-time data
-function updateRealtimeData(chart) {
+function updateRealtimeData() {
     const now = Date.now();
     fetch(`/api/camera/{{ camera.id }}/traffic/current`)
         .then(response => response.json())
@@ -287,19 +268,19 @@ function updateRealtimeData(chart) {
                 const time = new Date(now);
                 
                 // Add to chart data
-                chart.data.labels.push(time);
-                chart.data.datasets[0].data.push({x: time, y: rxRate});
-                chart.data.datasets[1].data.push({x: time, y: txRate});
+                realtimeChart.data.labels.push(time);
+                realtimeChart.data.datasets[0].data.push({x: time, y: rxRate});
+                realtimeChart.data.datasets[1].data.push({x: time, y: txRate});
                 
-                // Remove old data points
-                if (chart.data.labels.length > MAX_POINTS) {
-                    chart.data.labels.shift();
-                    chart.data.datasets[0].data.shift();
-                    chart.data.datasets[1].data.shift();
+                // Remove old data points (keep last 60 points = 5 minutes at 5-second intervals)
+                if (realtimeChart.data.labels.length > MAX_POINTS) {
+                    realtimeChart.data.labels.shift();
+                    realtimeChart.data.datasets[0].data.shift();
+                    realtimeChart.data.datasets[1].data.shift();
                 }
                 
                 // Update chart
-                chart.update('none'); // 'none' for better performance
+                realtimeChart.update('none'); // 'none' for better performance
             }
         })
         .catch(error => {
@@ -400,6 +381,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // Update stats immediately and then every 5 seconds
     updateCurrentStats();
     setInterval(updateCurrentStats, 5000);
+    
+    // Start real-time chart updates every 5 seconds
+    updateRealtimeData();
+    setInterval(updateRealtimeData, 5000);
     
     // Reload graph every 60 seconds
     setInterval(() => loadTrafficGraph(currentRange), 60000);
