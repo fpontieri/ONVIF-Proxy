@@ -24,7 +24,7 @@ from src.traffic_monitor import TrafficMonitor
 from urllib.parse import urlparse
 
 app = Flask(__name__)
-app.version = "v2.0.57 - 2025-08-25 16:07"
+app.version = "v2.0.58 - 2025-08-25 16:48"
 app.secret_key = os.urandom(24)
 app.debug = True
 

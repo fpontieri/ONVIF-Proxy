@@ -148,8 +148,9 @@
 }
 
 #traffic-graph {
-    max-width: 100%;
+    width: 100%;
     height: auto;
+    display: block;
 }
 
 .btn-group .btn.active {
@@ -163,25 +164,30 @@
 <script>
 let currentRange = '-1h';
 let realtimeData = {
-    labels: [],
     datasets: [
         {
             label: 'RX Bytes/s',
             data: [],
             borderColor: 'rgba(54, 162, 235, 1)',
-            backgroundColor: 'rgba(54, 162, 235, 0.2)',
+            backgroundColor: 'rgba(54, 162, 235, 0.15)',
             borderWidth: 2,
-            tension: 0.1,
-            fill: true
+            tension: 0.25,
+            fill: true,
+            pointRadius: 0,
+            spanGaps: true,
+            yAxisID: 'y'
         },
         {
             label: 'TX Bytes/s',
             data: [],
             borderColor: 'rgba(255, 99, 132, 1)',
-            backgroundColor: 'rgba(255, 99, 132, 0.2)',
+            backgroundColor: 'rgba(255, 99, 132, 0.15)',
             borderWidth: 2,
-            tension: 0.1,
-            fill: true
+            tension: 0.25,
+            fill: true,
+            pointRadius: 0,
+            spanGaps: true,
+            yAxisID: 'y1'
         }
     ]
 };
@@ -190,7 +196,7 @@ let realtimeChart;
 let lastRxBytes = 0;
 let lastTxBytes = 0;
 let lastUpdateTime = Date.now();
-const MAX_POINTS = 60; // Keep last 60 data points (1 minute at 1s intervals)
+const MAX_POINTS = 60; // Keep last 60 data points (~5 minutes at 5s intervals)
 
 // Initialize real-time chart
 function initRealtimeChart() {
@@ -213,21 +219,19 @@ function initRealtimeChart() {
                 x: {
                     type: 'time',
                     time: {
-                        displayFormats: {
-                            second: 'HH:mm:ss'
-                        }
+                        displayFormats: { second: 'HH:mm:ss' }
                     },
-                    title: {
-                        display: true,
-                        text: 'Time'
-                    }
+                    title: { display: true, text: 'Time' }
                 },
                 y: {
                     beginAtZero: true,
-                    title: {
-                        display: true,
-                        text: 'Bytes per Second'
-                    }
+                    title: { display: true, text: 'RX Bytes/s' }
+                },
+                y1: {
+                    beginAtZero: true,
+                    position: 'right',
+                    grid: { drawOnChartArea: false },
+                    title: { display: true, text: 'TX Bytes/s' }
                 }
             },
             plugins: {
@@ -266,15 +270,13 @@ function updateRealtimeData() {
                 
                 // Add new data point
                 const time = new Date(now);
-                
-                // Add to chart data
-                realtimeChart.data.labels.push(time);
-                realtimeChart.data.datasets[0].data.push({x: time, y: rxRate});
-                realtimeChart.data.datasets[1].data.push({x: time, y: txRate});
+                // Add to chart data using {x,y} points only (no labels array)
+                realtimeChart.data.datasets[0].data.push({ x: time, y: rxRate });
+                realtimeChart.data.datasets[1].data.push({ x: time, y: txRate });
                 
                 // Remove old data points (keep last 60 points = 5 minutes at 5-second intervals)
-                if (realtimeChart.data.labels.length > MAX_POINTS) {
-                    realtimeChart.data.labels.shift();
+                const len = realtimeChart.data.datasets[0].data.length;
+                if (len > MAX_POINTS) {
                     realtimeChart.data.datasets[0].data.shift();
                     realtimeChart.data.datasets[1].data.shift();
                 }
@@ -296,7 +298,11 @@ function loadTrafficGraph(range = '-1h') {
     document.getElementById('graph-container').style.display = 'none';
     document.getElementById('graph-error').style.display = 'none';
     
-    const graphUrl = `/api/camera/{{ camera.id }}/traffic/graph?range=${range}&width=800&height=400&t=${Date.now()}`;
+    // Compute desired image width from container to fill available width
+    const container = document.getElementById('graph-container').parentElement; // card-body
+    const containerWidth = Math.max(600, Math.floor(container.clientWidth || 800));
+    const desiredHeight = Math.floor(containerWidth * 0.5); // 2:1 ratio
+    const graphUrl = `/api/camera/{{ camera.id }}/traffic/graph?range=${range}&width=${containerWidth}&height=${desiredHeight}&t=${Date.now()}`;
     
     fetch(graphUrl)
         .then(response => {
@@ -340,19 +346,15 @@ function updateCurrentStats() {
                 document.getElementById('total-rx-packets-24h').textContent = (totals24h.rx_packets || 0).toLocaleString();
                 document.getElementById('total-tx-packets-24h').textContent = (totals24h.tx_packets || 0).toLocaleString();
                 
-                // Update real-time chart with current rates
-                const now = new Date();
-                realtimeData.labels.push(now);
-                realtimeData.datasets[0].data.push(avg5min.rx_bytes_per_sec || 0);
-                realtimeData.datasets[1].data.push(avg5min.tx_bytes_per_sec || 0);
-                
-                // Keep only last 60 data points (5 minutes at 5-second intervals)
-                if (realtimeData.labels.length > 60) {
-                    realtimeData.labels.shift();
-                    realtimeData.datasets[0].data.shift();
-                    realtimeData.datasets[1].data.shift();
+                // Also update real-time chart using summary rates to avoid gaps
+                const nowTime = new Date();
+                realtimeChart.data.datasets[0].data.push({ x: nowTime, y: avg5min.rx_bytes_per_sec || 0 });
+                realtimeChart.data.datasets[1].data.push({ x: nowTime, y: avg5min.tx_bytes_per_sec || 0 });
+                const dlen = realtimeChart.data.datasets[0].data.length;
+                if (dlen > MAX_POINTS) {
+                    realtimeChart.data.datasets[0].data.shift();
+                    realtimeChart.data.datasets[1].data.shift();
                 }
-                
                 realtimeChart.update('none');
             }
         })
