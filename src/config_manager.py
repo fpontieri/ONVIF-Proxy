@@ -67,6 +67,9 @@ class ConfigManager:
         ET.SubElement(system, "notify_system_error_priority").text = "1"
         ET.SubElement(system, "notify_service_restart").text = "false"
         ET.SubElement(system, "notify_service_restart_priority").text = "0"
+        ET.SubElement(system, "no_traffic_alerts").text = "true"
+        ET.SubElement(system, "no_traffic_minutes").text = "5"
+        ET.SubElement(system, "no_traffic_priority").text = "1"
         
         # Cameras section
         ET.SubElement(self.root, "cameras")
@@ -137,24 +140,60 @@ class ConfigManager:
             "notify_system_error": self._parse_bool(system.find("notify_system_error").text if system.find("notify_system_error") is not None else "true"),
             "notify_system_error_priority": int(system.find("notify_system_error_priority").text) if system.find("notify_system_error_priority") is not None and system.find("notify_system_error_priority").text else 1,
             "notify_service_restart": self._parse_bool(system.find("notify_service_restart").text if system.find("notify_service_restart") is not None else "false"),
-            "notify_service_restart_priority": int(system.find("notify_service_restart_priority").text) if system.find("notify_service_restart_priority") is not None and system.find("notify_service_restart_priority").text else 0
+            "notify_service_restart_priority": int(system.find("notify_service_restart_priority").text) if system.find("notify_service_restart_priority") is not None and system.find("notify_service_restart_priority").text else 0,
+            "no_traffic_alerts": self._parse_bool(system.find("no_traffic_alerts").text if system.find("no_traffic_alerts") is not None else "true"),
+            "no_traffic_minutes": int(system.find("no_traffic_minutes").text) if system.find("no_traffic_minutes") is not None and system.find("no_traffic_minutes").text else 5,
+            "no_traffic_priority": int(system.find("no_traffic_priority").text) if system.find("no_traffic_priority") is not None and system.find("no_traffic_priority").text else 1
         }
     
     def update_system_config(self, config: Dict):
-        """Update system configuration"""
-        # Reload config first to ensure we have the latest data including cameras
-        self.reload_config()
-        
-        system = self.root.find("system")
+        """Update system configuration with new values"""
+        system = self.root.find('system')
         if system is None:
-            system = ET.SubElement(self.root, "system")
-        
+            system = ET.SubElement(self.root, 'system')
+            
         for key, value in config.items():
-            element = system.find(key)
-            if element is None:
-                element = ET.SubElement(system, key)
-            element.text = str(value)
+            # Skip notification-specific settings that should be in the notification config
+            if key in ['pushover_token', 'pushover_user', 'notify_camera_up', 'notify_camera_down', 
+                      'notify_camera_added', 'notify_camera_removed', 'notify_system_error',
+                      'notify_priority', 'notify_retry', 'notify_expire']:
+                continue
+                
+            elem = system.find(key)
+            if elem is None:
+                elem = ET.SubElement(system, key)
+            elem.text = str(value).lower() if isinstance(value, bool) else str(value)
+            
+        self.save_config()
         
+    def update_notification_config(self, config: Dict):
+        """Update notification configuration with new values"""
+        system = self.root.find('system')
+        if system is None:
+            system = ET.SubElement(self.root, 'system')
+            
+        # Map of notification settings to their default values if not provided
+        notification_settings = {
+            'pushover_token': '',
+            'pushover_user': '',
+            'notify_camera_up': False,
+            'notify_camera_down': False,
+            'notify_camera_added': False,
+            'notify_camera_removed': False,
+            'notify_system_error': False,
+            'notify_priority': 0,
+            'notify_retry': 300,
+            'notify_expire': 3600
+        }
+        
+        # Update with provided values
+        for key, default_value in notification_settings.items():
+            value = config.get(key, default_value)
+            elem = system.find(key)
+            if elem is None:
+                elem = ET.SubElement(system, key)
+            elem.text = str(value).lower() if isinstance(value, bool) else str(value)
+            
         self.save_config()
     
     def get_cameras(self) -> List[Dict]:

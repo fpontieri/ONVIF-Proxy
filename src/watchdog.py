@@ -430,7 +430,8 @@ Please check the system status and logs for more details."""
                     camera_ip = self._extract_camera_ip(camera.get('rtsp_url', ''))
                     
                     if virtual_ip and camera_ip:
-                        self.traffic_monitor.add_camera(camera_id, virtual_ip, camera_ip)
+                        rtsp_url = camera.get('rtsp_url', '')
+                        self.traffic_monitor.add_camera(camera_id, virtual_ip, camera_ip, rtsp_url)
                         self.logger.info(f"Added camera {camera_id} to traffic monitoring: {virtual_ip} -> {camera_ip}")
                         
         except Exception as e:
@@ -448,6 +449,10 @@ Please check the system status and logs for more details."""
     def _check_traffic_health(self):
         """Check RTSP traffic health for all cameras"""
         try:
+            system_config = self.config_manager.get_system_config()
+            no_traffic_minutes = int(system_config.get('no_traffic_minutes', 5))
+            threshold_seconds = no_traffic_minutes * 60
+            
             cameras = self.config_manager.get_cameras()
             current_time = time.time()
             
@@ -458,15 +463,15 @@ Please check the system status and logs for more details."""
                 camera_id = camera['id']
                 camera_name = camera.get('name', f'Camera {camera_id}')
                 
-                # Check if camera has recent traffic (within last 60 seconds)
-                has_traffic = self.traffic_monitor.has_recent_traffic(camera_id, threshold_seconds=60)
+                # Check if camera has recent traffic within the configured threshold
+                has_traffic = self.traffic_monitor.has_recent_traffic(camera_id, threshold_seconds=threshold_seconds)
                 
                 if not has_traffic:
                     # Check if we've already sent an alert recently
                     last_alert_time = self.camera_traffic_alerts.get(camera_id, 0)
                     
                     if current_time - last_alert_time > self.notification_cooldown:
-                        self._send_traffic_alert(camera_id, camera_name)
+                        self._send_traffic_alert(camera_id, camera_name, no_traffic_minutes)
                         self.camera_traffic_alerts[camera_id] = current_time
                 else:
                     # Clear alert state if traffic is restored
@@ -477,10 +482,10 @@ Please check the system status and logs for more details."""
         except Exception as e:
             self.logger.error(f"Error checking traffic health: {e}")
     
-    def _send_traffic_alert(self, camera_id: str, camera_name: str):
+    def _send_traffic_alert(self, camera_id: str, camera_name: str, no_traffic_minutes: int):
         """Send alert for no RTSP traffic"""
         try:
-            message = f"🚨 No RTSP traffic detected for {camera_name} (ID: {camera_id}) in the last minute"
+            message = f"🚨 No RTSP traffic detected for {camera_name} (ID: {camera_id}) in the last {no_traffic_minutes} minutes"
             
             system_config = self.config_manager.get_system_config()
             if system_config.get('notify_system_error', True):
@@ -493,7 +498,7 @@ Please check the system status and logs for more details."""
                 )
                 
                 if success:
-                    self.logger.warning(f"Sent no traffic alert for camera {camera_id}")
+                    self.logger.warning(f"Sent no traffic alert for camera {camera_id} (threshold: {no_traffic_minutes} minutes)")
                 else:
                     self.logger.error(f"Failed to send no traffic alert for camera {camera_id}")
                     

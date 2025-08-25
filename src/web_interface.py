@@ -16,6 +16,7 @@ import logging
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, Response, send_from_directory, make_response
 from functools import wraps
 import json
+import xml.etree.ElementTree as ET
 from src.config_manager import ConfigManager
 from src.network_manager import NetworkManager
 from src.notification_manager import NotificationManager
@@ -23,8 +24,13 @@ from src.traffic_monitor import TrafficMonitor
 from urllib.parse import urlparse
 
 app = Flask(__name__)
-app.version = "v2.0.37 - 2025-08-23 02:22:27 - Clean up iptables debug logs"
+app.version = "v2.0.55 - 2025-08-25 14:45 - Fix: import os in network_manager.get_available_interfaces()"
 app.secret_key = os.urandom(24)
+app.debug = True
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Hardcoded app version (increment on each change) with timestamp
 APP_VERSION = app.version
@@ -958,7 +964,10 @@ def camera_info(camera_id):
         })
     
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        status_code = 500
+        error_msg = str(e)
+        app.logger.error(f"[ERROR] {request.path} - {status_code} - {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), status_code
 
 @app.route('/api/camera/<camera_id>/refresh-ip', methods=['POST'])
 def refresh_camera_ip(camera_id):
@@ -1010,7 +1019,10 @@ def refresh_camera_ip(camera_id):
             return jsonify({'success': False, 'error': f'Error getting interface info: {str(e)}'})
     
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        status_code = 500
+        error_msg = str(e)
+        app.logger.error(f"[ERROR] {request.path} - {status_code} - {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), status_code
 
 @app.route('/api/camera/<camera_id>/toggle', methods=['POST'])
 def toggle_camera(camera_id):
@@ -1078,7 +1090,10 @@ def toggle_camera(camera_id):
             return jsonify({'success': False, 'error': 'Failed to update camera config'})
     
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        status_code = 500
+        error_msg = str(e)
+        app.logger.error(f"[ERROR] {request.path} - {status_code} - {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), status_code
 
 
 @app.route('/config-editor', methods=['GET', 'POST'])
@@ -1161,51 +1176,139 @@ def config_editor():
 @app.route('/settings', methods=['GET', 'POST'])
 def settings():
     """System settings page"""
+    # Initialize configs with default values
+    system_config = {}
+    notification_config = {}
+    
     if request.method == 'POST':
-        system_config = {
-            'enabled': request.form.get('enabled') == 'on',
-            'base_interface': request.form.get('base_interface', 'eth0'),
-            'base_ip_range': request.form.get('base_ip_range', '192.168.1.100'),
-            'ping_interval': int(request.form.get('ping_interval', 30)),
-            'pushover_token': request.form.get('pushover_token', ''),
-            'pushover_user': request.form.get('pushover_user', ''),
-            'web_port': int(request.form.get('web_port', 8080)),
-            'notify_camera_offline': request.form.get('notify_camera_offline') == 'on',
-            'notify_camera_offline_priority': int(request.form.get('notify_camera_offline_priority', 0)),
-            'notify_camera_online': request.form.get('notify_camera_online') == 'on',
-            'notify_camera_online_priority': int(request.form.get('notify_camera_online_priority', 0)),
-            'notify_system_error': request.form.get('notify_system_error') == 'on',
-            'notify_system_error_priority': int(request.form.get('notify_system_error_priority', 0)),
-            'notify_service_restart': request.form.get('notify_service_restart') == 'on',
-            'notify_service_restart_priority': int(request.form.get('notify_service_restart_priority', 0))
-        }
-        
-        # Save system configuration
         try:
-            config_manager.update_system_config(system_config)
-        except Exception as e:
-            flash(f'Failed to save configuration: {str(e)}', 'error')
+            # Debug: Log all form data
+            app.logger.debug(f"Form data: {dict(request.form)}")
+            
+            # System configuration
+            system_config = {
+                'enabled': request.form.get('enabled') == 'on',
+                'base_interface': request.form.get('base_interface', 'eth0'),
+                'base_ip_range': request.form.get('base_ip_range', '192.168.1.100'),
+                'ping_interval': int(request.form.get('ping_interval', 30)),
+                'web_port': int(request.form.get('web_port', 8080)),
+                'notify_camera_offline': request.form.get('notify_camera_offline') == 'on',
+                'notify_camera_offline_priority': int(request.form.get('notify_camera_offline_priority', 0)),
+                'notify_camera_online': request.form.get('notify_camera_online') == 'on',
+                'notify_camera_online_priority': int(request.form.get('notify_camera_online_priority', 0)),
+                'notify_system_error': request.form.get('notify_system_error') == 'on',
+                'notify_system_error_priority': int(request.form.get('notify_system_error_priority', 0)),
+                'notify_service_restart': request.form.get('notify_service_restart') == 'on',
+                'notify_service_restart_priority': int(request.form.get('notify_service_restart_priority', 0)),
+                'no_traffic_alerts': request.form.get('no_traffic_alerts') == 'on',
+                'no_traffic_minutes': int(request.form.get('no_traffic_minutes', 5)),
+                'no_traffic_priority': int(request.form.get('no_traffic_priority', 1))
+            }
+            
+            app.logger.debug(f"Parsed system config: {system_config}")
+            
+            # Notification configuration
+            notification_config = {
+                'pushover_token': request.form.get('pushover_token', '').strip(),
+                'pushover_user': request.form.get('pushover_user', '').strip(),
+                'notify_camera_up': 'notify_camera_up' in request.form,
+                'notify_camera_down': 'notify_camera_down' in request.form,
+                'notify_camera_added': 'notify_camera_added' in request.form,
+                'notify_camera_removed': 'notify_camera_removed' in request.form,
+                'notify_system_error': 'notify_system_error' in request.form,
+                'notify_priority': int(request.form.get('notify_priority', 0)),
+                'notify_retry': int(request.form.get('notify_retry', 300)),
+                'notify_expire': int(request.form.get('notify_expire', 3600))
+            }
+            app.logger.debug(f"Parsed notification config: {notification_config}")
+            
+            # Save configurations
             try:
-                notification_manager.notify_fatal_error(f"Config write failure while updating settings: {e}")
-            except Exception:
-                pass
+                # First save the system config
+                config_manager.update_system_config(system_config)
+                
+                # Then save the notification config
+                method = getattr(config_manager, 'update_notification_config', None)
+                if callable(method):
+                    try:
+                        method(notification_config)
+                    except Exception as ue:
+                        app.logger.warning(f"update_notification_config failed, falling back to inline XML update: {ue}")
+                        system = config_manager.root.find('system')
+                        if system is not None:
+                            for key, value in notification_config.items():
+                                elem = system.find(key)
+                                if elem is None:
+                                    elem = ET.SubElement(system, key)
+                                elem.text = str(value).lower() if isinstance(value, bool) else str(value)
+                            config_manager.save_config()
+                else:
+                    # Fallback: Update notification settings directly in system config
+                    system = config_manager.root.find('system')
+                    if system is not None:
+                        for key, value in notification_config.items():
+                            elem = system.find(key)
+                            if elem is None:
+                                elem = ET.SubElement(system, key)
+                            elem.text = str(value).lower() if isinstance(value, bool) else str(value)
+                        config_manager.save_config()
+                    
+                    # Update notification manager with new credentials and settings
+                    try:
+                        if notification_manager:
+                            if hasattr(notification_manager, 'update_credentials'):
+                                notification_manager.update_credentials(
+                                    notification_config.get('pushover_token', ''),
+                                    notification_config.get('pushover_user', '')
+                                )
+                            
+                            # Update notification manager settings if method exists
+                            if hasattr(notification_manager, 'update_notification_settings'):
+                                notification_manager.update_notification_settings(notification_config)
+                        
+                    except Exception as ne:
+                        app.logger.error(f"Failed to update notification manager: {ne}", exc_info=True)
+                        # Don't fail the entire save if just notification update fails
+                    
+                    # Reload service configuration via systemd
+                    try:
+                        subprocess.run(['sudo', 'systemctl', 'reload-or-restart', 'onvif-proxy'], 
+                                     capture_output=True, text=True, timeout=10)
+                    except Exception as se:
+                        app.logger.warning(f"Failed to restart service: {se}")
+                    
+                    flash('Settings updated successfully!', 'success')
+                    return redirect(url_for('settings'))
+                    
+            except Exception as e:
+                app.logger.error(f"Error saving configuration: {e}", exc_info=True)
+                flash(f'Failed to save configuration: {str(e)}', 'error')
+                try:
+                    if notification_manager and hasattr(notification_manager, 'notify_fatal_error'):
+                        notification_manager.notify_fatal_error(f"Config write failure while updating settings: {e}")
+                except Exception as ne:
+                    app.logger.error(f"Failed to send notification: {ne}")
+                
+        except (ValueError, TypeError) as e:
+            app.logger.error(f"Error parsing form data: {e}", exc_info=True)
+            flash(f'Invalid form data: {str(e)}', 'error')
             return redirect(url_for('settings'))
         
-        notification_manager.update_credentials(
-            system_config['pushover_token'],
-            system_config['pushover_user']
-        )
-        
-        # Reload service configuration via systemd
+        # For GET requests or if there was an error in POST
         try:
-            subprocess.run(['sudo', 'systemctl', 'reload-or-restart', 'onvif-proxy'], 
-                         capture_output=True, text=True, timeout=10)
-        except:
-            pass  # Service reload is best effort
-        
-        flash('Settings updated successfully!', 'success')
-        
-        return redirect(url_for('settings'))
+            system_config = config_manager.get_system_config()
+            interfaces = network_manager.get_available_interfaces()
+            
+            return render_template('settings.html', 
+                                 system_config=system_config, 
+                                 interfaces=interfaces)
+                                 
+        except Exception as e:
+            app.logger.error(f"Error loading settings: {e}", exc_info=True)
+            flash(f'Error loading settings: {str(e)}', 'error')
+            return render_template('settings.html', 
+                                 system_config={},
+                                 interfaces=[])
     
     system_config = config_manager.get_system_config()
     interfaces = network_manager.get_available_interfaces()
@@ -1387,7 +1490,10 @@ def api_camera_traffic_current(camera_id):
         })
         
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        status_code = 500
+        error_msg = str(e)
+        app.logger.error(f"[ERROR] {request.path} - {status_code} - {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), status_code
 
 @app.route('/api/camera/<camera_id>/traffic/graph')
 def api_camera_traffic_graph(camera_id):
@@ -1427,7 +1533,10 @@ def api_camera_traffic_graph(camera_id):
             return jsonify({'error': 'Failed to generate graph'}), 500
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        status_code = 500
+        error_msg = str(e)
+        app.logger.error(f"[ERROR] {request.path} - {status_code} - {error_msg}")
+        return jsonify({'error': error_msg}), status_code
 
 @app.route('/api/camera/<camera_id>/traffic/data')
 def api_camera_traffic_data(camera_id):
@@ -1459,7 +1568,10 @@ def api_camera_traffic_data(camera_id):
             return jsonify({'error': 'No data available'}), 404
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        status_code = 500
+        error_msg = str(e)
+        app.logger.error(f"[ERROR] {request.path} - {status_code} - {error_msg}")
+        return jsonify({'error': error_msg}), status_code
 
 @app.route('/validate_rtsp', methods=['POST'])
 def validate_rtsp():
@@ -1829,6 +1941,60 @@ def create_app():
         app.logger.warning(f"[NOTIFICATION] Failed to send startup notification: {e}")
     
     return app
+
+@app.route('/api/camera/<camera_id>/screenshot')
+def api_camera_screenshot(camera_id):
+    """Serve camera screenshot"""
+    try:
+        config_dir = os.path.dirname(config_manager.config_path)
+        screenshots_dir = os.path.join(config_dir, "screenshots")
+        screenshot_file = f"camera_{camera_id}_latest.jpg"
+        screenshot_path = os.path.join(screenshots_dir, screenshot_file)
+        
+        if os.path.exists(screenshot_path):
+            return send_from_directory(screenshots_dir, screenshot_file)
+        else:
+            # Return a placeholder or 404
+            return jsonify({'error': 'Screenshot not available'}), 404
+            
+    except Exception as e:
+        status_code = 500
+        error_msg = str(e)
+        app.logger.error(f"[ERROR] {request.path} - {status_code} - {error_msg}")
+        return jsonify({'error': error_msg}), status_code
+
+@app.route('/api/camera/<camera_id>/traffic/summary')
+def api_camera_traffic_summary(camera_id):
+    """Get traffic summary with 5-min averages and 24h totals"""
+    try:
+        ensure_fresh_config()
+        camera = config_manager.get_camera(camera_id)
+        if not camera:
+            return jsonify({'error': 'Camera not found'}), 404
+        
+        # Ensure RRD mapping exists for this camera in the monitor instance
+        if camera_id not in getattr(traffic_monitor, 'cameras', {}):
+            virtual_ip = camera.get('onvif_ip')
+            camera_ip = _extract_camera_ip(camera.get('rtsp_url', ''))
+            if virtual_ip and camera_ip:
+                rrd_path = os.path.join(traffic_monitor.rrd_base_path, f"camera_{camera_id}_traffic.rrd")
+                traffic_monitor.cameras[camera_id] = {
+                    'virtual_ip': virtual_ip,
+                    'camera_ip': camera_ip,
+                    'rrd_file': rrd_path
+                }
+        
+        summary = traffic_monitor.get_traffic_summary(camera_id)
+        if summary:
+            return jsonify(summary)
+        else:
+            return jsonify({'error': 'No traffic data available'}), 404
+            
+    except Exception as e:
+        status_code = 500
+        error_msg = str(e)
+        app.logger.error(f"[ERROR] {request.path} - {status_code} - {error_msg}")
+        return jsonify({'error': error_msg}), status_code
 
 if __name__ == '__main__':
     app = create_app()

@@ -54,13 +54,54 @@ ensure_traffic_acct_chain() {
 # Ensure config directory and file permissions are correct
 ensure_config_permissions() {
     print_status "Ensuring configuration directory and file permissions..."
+    
+    # Create directory if it doesn't exist
     mkdir -p "/var/lib/onvif-proxy"
-    chown $SERVICE_USER:$SERVICE_USER "/var/lib/onvif-proxy" || true
-    chmod 755 "/var/lib/onvif-proxy" || true
+    
+    # First, set ownership of the main directory
+    chown onvif-proxy:onvif-proxy "/var/lib/onvif-proxy"
+    
+    # Set directory permissions to 775 (rwxrwxr-x)
+    chmod 775 "/var/lib/onvif-proxy"
+    
+    # Ensure all files and directories are owned by onvif-proxy user and group
+    find "/var/lib/onvif-proxy" -exec chown onvif-proxy:onvif-proxy {} \;
+    
+    # Set directory permissions to 775 (rwxrwxr-x)
+    find "/var/lib/onvif-proxy" -type d -exec chmod 775 {} \;
+    
+    # Set file permissions to 664 (rw-rw-r--)
+    find "/var/lib/onvif-proxy" -type f -exec chmod 664 {} \;
+    
+    # Make sure all directories are executable
+    find "/var/lib/onvif-proxy" -type d -exec chmod +x {} \;
+    
+    # Special handling for config.xml
     if [ -f "/var/lib/onvif-proxy/config.xml" ]; then
-        chown $SERVICE_USER:$SERVICE_USER "/var/lib/onvif-proxy/config.xml" || true
-        chmod 644 "/var/lib/onvif-proxy/config.xml" || true
+        chown onvif-proxy:onvif-proxy "/var/lib/onvif-proxy/config.xml"
+        chmod 664 "/var/lib/onvif-proxy/config.xml"
     fi
+    
+    # Ensure screenshots directory exists with correct permissions
+    mkdir -p "/var/lib/onvif-proxy/screenshots"
+    chown -R onvif-proxy:onvif-proxy "/var/lib/onvif-proxy/screenshots"
+    chmod 775 "/var/lib/onvif-proxy/screenshots"
+    
+    # Ensure rrd directory exists with correct permissions
+    mkdir -p "/var/lib/onvif-proxy/rrd"
+    chown -R onvif-proxy:onvif-proxy "/var/lib/onvif-proxy/rrd"
+    chmod 775 "/var/lib/onvif-proxy/rrd"
+    
+    # Set special permissions for specific file types
+    find "/var/lib/onvif-proxy" -name "*.rrd" -exec chmod 664 {} \;
+    find "/var/lib/onvif-proxy" -name "*.png" -exec chmod 664 {} \;
+    find "/var/lib/onvif-proxy" -name "*.bak" -o -name "*.backup.*" -exec chmod 664 {} \;
+    
+    # Ensure all files are readable by the group
+    find "/var/lib/onvif-proxy" -type f -exec chmod g+r {} \;
+    
+    # Ensure all directories are searchable by the group
+    find "/var/lib/onvif-proxy" -type d -exec chmod g+rx {} \;
 }
 
 print_success() {
@@ -132,10 +173,16 @@ copy_application_files() {
     
     # Set proper permissions
     print_status "Setting file permissions..."
-    chown -R $SERVICE_USER:$SERVICE_USER "$INSTALL_DIR"
+    # Set directory and file permissions
+    find "$INSTALL_DIR" -type d -exec chmod 755 {} \;
+    find "$INSTALL_DIR" -type f -exec chmod 644 {} \;
+    # Make scripts executable
     chmod +x "$INSTALL_DIR/src/main_service.py"
     chmod +x "$INSTALL_DIR/src/web_interface.py"
     chmod +x "$INSTALL_DIR/src/watchdog.py"
+    chmod +x "$INSTALL_DIR/install.sh"
+    # Ensure proper ownership
+    chown -R onvif-proxy:onvif-proxy "$INSTALL_DIR"
 }
 
 # Function to install systemd services
@@ -146,9 +193,9 @@ install_systemd_services() {
     cp "$INSTALL_DIR/onvif-proxy-watchdog.service" "$SYSTEMD_DIR/"
 
     # Update service files with correct paths
-    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy.service"
-    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy-web.service"
-    sed -i "s|/home/felipe/onvif-proxy/ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy-watchdog.service"
+    sed -i "s|./ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy.service"
+    sed -i "s|./ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy-web.service"
+    sed -i "s|./ONVIF-Proxy|$INSTALL_DIR|g" "$SYSTEMD_DIR/onvif-proxy-watchdog.service"
 
     # Update service files to use correct user
     # Keep main service as root (needs CAP_NET_ADMIN and DHCP), run web and watchdog as service user
@@ -258,17 +305,17 @@ install_onvif_proxy() {
     # Create log directory
     print_status "Creating log directory: $LOG_DIR"
     mkdir -p "$LOG_DIR"
-    chown $SERVICE_USER:$SERVICE_USER "$LOG_DIR"
+    chown onvif-proxy:onvif-proxy "$LOG_DIR"
 
     # Create Gunicorn log directory
     print_status "Creating Gunicorn log directory: /var/log/onvif-proxy"
     mkdir -p "/var/log/onvif-proxy"
-    chown $SERVICE_USER:$SERVICE_USER "/var/log/onvif-proxy"
+    chown onvif-proxy:onvif-proxy "/var/log/onvif-proxy"
 
     # Create run directory for PID files
     print_status "Creating run directory: /run/onvif-proxy"
     mkdir -p "/run/onvif-proxy"
-    chown $SERVICE_USER:$SERVICE_USER "/run/onvif-proxy"
+    chown onvif-proxy:onvif-proxy "/run/onvif-proxy"
 
     # Install systemd services
     install_systemd_services
@@ -320,7 +367,7 @@ EOF
     # Create config directory and file
     print_status "Creating configuration directory..."
     mkdir -p "/var/lib/onvif-proxy"
-    chown $SERVICE_USER:$SERVICE_USER "/var/lib/onvif-proxy"
+    chown onvif-proxy:onvif-proxy "/var/lib/onvif-proxy"
     chmod 755 "/var/lib/onvif-proxy"
     
     # Check for existing config and create backup if needed
@@ -329,7 +376,7 @@ EOF
         cp "/var/lib/onvif-proxy/config.xml" "/var/lib/onvif-proxy/config.xml.backup.$(date +%Y%m%d_%H%M%S)"
         print_status "Preserving existing configuration settings"
         # Ensure proper ownership and permissions on existing config
-        chown $SERVICE_USER:$SERVICE_USER "/var/lib/onvif-proxy/config.xml"
+        chown onvif-proxy:onvif-proxy "/var/lib/onvif-proxy/config.xml"
         chmod 644 "/var/lib/onvif-proxy/config.xml"
     else
         print_status "Creating default configuration file..."
@@ -348,7 +395,7 @@ EOF
     </cameras>
 </onvif_proxy>
 EOF
-        chown $SERVICE_USER:$SERVICE_USER "/var/lib/onvif-proxy/config.xml"
+        chown onvif-proxy:onvif-proxy "/var/lib/onvif-proxy/config.xml"
         chmod 644 "/var/lib/onvif-proxy/config.xml"
     fi
 
@@ -616,7 +663,7 @@ except Exception as e:
     else
         print_status "Configuration directory preserved: /var/lib/onvif-proxy"
         # Change ownership back to root to preserve after user removal
-        chown -R root:root "/var/lib/onvif-proxy" 2>/dev/null || true
+        chown -R onvif-proxy:onvif-proxy "/var/lib/onvif-proxy" 2>/dev/null || true
     fi
 
     # Remove service user

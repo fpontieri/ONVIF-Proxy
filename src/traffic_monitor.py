@@ -32,21 +32,32 @@ class TrafficMonitor:
     def __init__(self, rrd_base_path: str = "/var/lib/onvif-proxy"):
         self.rrd_base_path = rrd_base_path
         self.logger = logging.getLogger(__name__)
+        # Reduce logging level for this module to WARNING to reduce log spam
+        self.logger.setLevel(logging.WARNING)
         self.running = False
         self.monitor_thread = None
         self.cameras = {}  # camera_id -> camera_info
         self.last_stats = {}  # camera_id -> TrafficStats
+        self.last_screenshot = {}  # camera_id -> timestamp of last screenshot
         
         # Ensure RRD directory exists (now the same as config directory)
         os.makedirs(self.rrd_base_path, exist_ok=True)
         
-    def add_camera(self, camera_id: str, virtual_ip: str, camera_ip: str):
+        # Ensure screenshots directory exists
+        self.screenshots_path = os.path.join(self.rrd_base_path, "screenshots")
+        os.makedirs(self.screenshots_path, exist_ok=True)
+        
+    def add_camera(self, camera_id: str, virtual_ip: str, camera_ip: str, rtsp_url: str = None):
         """Add a camera to traffic monitoring"""
         self.cameras[camera_id] = {
             'virtual_ip': virtual_ip,
             'camera_ip': camera_ip,
+            'rtsp_url': rtsp_url,
             'rrd_file': os.path.join(self.rrd_base_path, f"camera_{camera_id}_traffic.rrd")
         }
+        
+        # Initialize screenshot timestamp
+        self.last_screenshot[camera_id] = 0
         
         # Ensure accounting chain and rules for this camera exist
         try:
@@ -69,6 +80,8 @@ class TrafficMonitor:
             del self.cameras[camera_id]
         if camera_id in self.last_stats:
             del self.last_stats[camera_id]
+        if camera_id in self.last_screenshot:
+            del self.last_screenshot[camera_id]
             
     def _create_rrd_file(self, camera_id: str):
         """Create RRD file for camera traffic data"""
@@ -267,6 +280,46 @@ class TrafficMonitor:
                 if rm.returncode != 0:
                     break
             break
+    
+    def _capture_screenshot(self, camera_id: str):
+        """Capture a screenshot from the camera's RTSP stream"""
+        if camera_id not in self.cameras:
+            return
+            
+        camera_info = self.cameras[camera_id]
+        rtsp_url = camera_info.get('rtsp_url')
+        
+        if not rtsp_url:
+            self.logger.debug(f"[SCREENSHOT] No RTSP URL for camera {camera_id}, skipping screenshot")
+            return
+            
+        screenshot_file = os.path.join(self.screenshots_path, f"camera_{camera_id}_latest.jpg")
+        
+        try:
+            # Use ffmpeg to capture a single frame
+            cmd = [
+                'ffmpeg',
+                '-y',  # Overwrite output file
+                '-rtsp_transport', 'tcp',
+                '-timeout', '10000000',  # 10 second timeout in microseconds
+                '-i', rtsp_url,
+                '-frames:v', '1',  # Capture only 1 frame
+                '-q:v', '2',  # High quality
+                '-f', 'image2',
+                screenshot_file
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            
+            if result.returncode == 0 and os.path.exists(screenshot_file):
+                self.logger.debug(f"[SCREENSHOT] Captured screenshot for camera {camera_id}")
+            else:
+                self.logger.warning(f"[SCREENSHOT] Failed to capture screenshot for camera {camera_id}: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            self.logger.warning(f"[SCREENSHOT] Screenshot capture timed out for camera {camera_id}")
+        except Exception as e:
+            self.logger.error(f"[SCREENSHOT] Error capturing screenshot for camera {camera_id}: {e}")
             
     def _update_rrd(self, camera_id: str, stats: TrafficStats):
         """Update RRD file with traffic statistics"""
@@ -280,7 +333,10 @@ class TrafficMonitor:
             )
             
         except Exception as e:
-            self.logger.error(f"Failed to update RRD for camera {camera_id}: {e}")
+            # Only log errors if they're not related to missing DS or similar common issues
+            if "No such file or directory" not in str(e):
+                self.logger.warning(f"Failed to update RRD for camera {camera_id}: {e}")
+            return
             
     def get_current_stats(self, camera_id: str) -> Optional[TrafficStats]:
         """Get current traffic statistics for a camera"""
@@ -391,6 +447,8 @@ class TrafficMonitor:
         """Main monitoring loop"""
         while self.running:
             try:
+                current_time = time.time()
+                
                 for camera_id in list(self.cameras.keys()):
                     stats = self.get_current_stats(camera_id)
                     if stats:
@@ -400,6 +458,12 @@ class TrafficMonitor:
                         )
                         self._update_rrd(camera_id, stats)
                         self.last_stats[camera_id] = stats
+                    
+                    # Check if we need to take a screenshot (every 5 minutes = 300 seconds)
+                    last_screenshot_time = self.last_screenshot.get(camera_id, 0)
+                    if current_time - last_screenshot_time >= 300:  # 5 minutes
+                        self._capture_screenshot(camera_id)
+                        self.last_screenshot[camera_id] = current_time
                         
                 time.sleep(5)  # Monitor every 5 seconds
                 
@@ -462,3 +526,80 @@ class TrafficMonitor:
         except Exception as e:
             self.logger.error(f"Failed to create graph for camera {camera_id}: {e}")
             return False
+    
+    def get_traffic_summary(self, camera_id: str) -> Optional[Dict]:
+        """Get traffic summary with 5-minute averages and 24-hour totals"""
+        if camera_id not in self.cameras:
+            return None
+            
+        try:
+            rrd_file = self.cameras[camera_id]['rrd_file']
+            if not os.path.exists(rrd_file):
+                return None
+            
+            # Get 5-minute average data (last 5 minutes)
+            result_5min = rrdtool.fetch(
+                rrd_file,
+                'AVERAGE',
+                '--start', '-5m',
+                '--end', 'now'
+            )
+            
+            # Get 24-hour total data
+            result_24h = rrdtool.fetch(
+                rrd_file,
+                'AVERAGE', 
+                '--start', '-24h',
+                '--end', 'now'
+            )
+            
+            # Calculate 5-minute averages
+            _, _, data_5min = result_5min
+            rx_bytes_5min = tx_bytes_5min = rx_packets_5min = tx_packets_5min = 0
+            count_5min = 0
+            
+            for point in data_5min:
+                if point[0] is not None and point[1] is not None:
+                    rx_bytes_5min += point[0]
+                    tx_bytes_5min += point[1]
+                    rx_packets_5min += point[2] if point[2] is not None else 0
+                    tx_packets_5min += point[3] if point[3] is not None else 0
+                    count_5min += 1
+            
+            if count_5min > 0:
+                rx_bytes_5min_avg = rx_bytes_5min / count_5min
+                tx_bytes_5min_avg = tx_bytes_5min / count_5min
+                rx_packets_5min_avg = rx_packets_5min / count_5min
+                tx_packets_5min_avg = tx_packets_5min / count_5min
+            else:
+                rx_bytes_5min_avg = tx_bytes_5min_avg = rx_packets_5min_avg = tx_packets_5min_avg = 0
+            
+            # Calculate 24-hour totals
+            _, _, data_24h = result_24h
+            rx_bytes_24h = tx_bytes_24h = rx_packets_24h = tx_packets_24h = 0
+            
+            for point in data_24h:
+                if point[0] is not None and point[1] is not None:
+                    rx_bytes_24h += point[0]
+                    tx_bytes_24h += point[1]
+                    rx_packets_24h += point[2] if point[2] is not None else 0
+                    tx_packets_24h += point[3] if point[3] is not None else 0
+            
+            return {
+                'averages_5min': {
+                    'rx_bytes_per_sec': rx_bytes_5min_avg,
+                    'tx_bytes_per_sec': tx_bytes_5min_avg,
+                    'rx_packets_per_sec': rx_packets_5min_avg,
+                    'tx_packets_per_sec': tx_packets_5min_avg
+                },
+                'totals_24h': {
+                    'rx_bytes': rx_bytes_24h,
+                    'tx_bytes': tx_bytes_24h,
+                    'rx_packets': rx_packets_24h,
+                    'tx_packets': tx_packets_24h
+                }
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get traffic summary for camera {camera_id}: {e}")
+            return None

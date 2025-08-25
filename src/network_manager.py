@@ -6,6 +6,7 @@ Handles IP aliases and MAC address configuration
 
 import subprocess
 import logging
+import os
 import netifaces
 from typing import List, Dict, Optional
 
@@ -77,8 +78,36 @@ class NetworkManager:
             self.logger.warning(f"Failed to remove FORWARD allow rules: {e}")
     
     def get_available_interfaces(self) -> List[str]:
-        """Get list of available network interfaces"""
-        return netifaces.interfaces()
+        """Get list of available physical network interfaces, excluding virtual interfaces"""
+        all_interfaces = netifaces.interfaces()
+        # Common virtual interface prefixes to exclude
+        virtual_prefixes = ('lo', 'docker', 'veth', 'br-', 'virbr', 'tun', 'tap', 'vnet', 'macvtap', 'wl', 'ww')
+        
+        physical_interfaces = []
+        for iface in all_interfaces:
+            # Skip interfaces that match virtual prefixes
+            if any(iface.startswith(prefix) for prefix in virtual_prefixes):
+                continue
+                
+            # Skip interfaces that don't have a physical device
+            if not os.path.exists(f"/sys/class/net/{iface}/device"):
+                continue
+                
+            # Skip wireless interfaces (they typically start with wl or ww)
+            if iface.startswith(('wl', 'ww')):
+                continue
+                
+            # Skip interfaces that are part of a bridge or bond
+            try:
+                with open(f"/sys/class/net/{iface}/master/uevent", 'r') as f:
+                    if 'BRIDGE' in f.read() or 'BOND' in f.read():
+                        continue
+            except (FileNotFoundError, PermissionError):
+                pass
+                
+            physical_interfaces.append(iface)
+        
+        return sorted(physical_interfaces)
     
     def get_interface_addresses(self, interface: str) -> Dict:
         """Get current addresses for an interface"""

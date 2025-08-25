@@ -208,6 +208,45 @@
                         <i class="fas fa-exclamation-triangle"></i>
                         <strong>Priority Levels:</strong> Silent (no notification), Quiet (no sound), Normal (default), High (bypass quiet hours), Emergency (repeat until acknowledged)
                     </div>
+
+                    <hr>
+                    <h6 class="mb-3">No-Traffic Alerts</h6>
+                    <div class="mb-3">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="no_traffic_alerts" name="no_traffic_alerts" 
+                                   {{ 'checked' if system_config.get('no_traffic_alerts', True) else '' }}>
+                            <label class="form-check-label" for="no_traffic_alerts">
+                                <strong>Enable No-Traffic Alerts</strong>
+                            </label>
+                            <div class="form-text">Send alerts when no traffic is detected from a camera</div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="no_traffic_minutes" class="form-label">No-Traffic Threshold</label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="no_traffic_minutes" name="no_traffic_minutes" 
+                                           value="{{ system_config.get('no_traffic_minutes', 5) }}" min="1" max="1440" required>
+                                    <span class="input-group-text">minutes</span>
+                                </div>
+                                <div class="form-text">Alert if no traffic is detected for this many minutes</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="no_traffic_priority" class="form-label">Alert Priority</label>
+                                <select class="form-select" id="no_traffic_priority" name="no_traffic_priority">
+                                    <option value="-2" {{ 'selected' if system_config.get('no_traffic_priority', 1) == -2 }}>Silent</option>
+                                    <option value="-1" {{ 'selected' if system_config.get('no_traffic_priority', 1) == -1 }}>Quiet</option>
+                                    <option value="0" {{ 'selected' if system_config.get('no_traffic_priority', 1) == 0 }}>Normal</option>
+                                    <option value="1" {{ 'selected' if system_config.get('no_traffic_priority', 1) == 1 }}>High</option>
+                                    <option value="2" {{ 'selected' if system_config.get('no_traffic_priority', 1) == 2 }}>Emergency</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 

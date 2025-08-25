@@ -28,46 +28,76 @@
                     <h5><i class="fas fa-tachometer-alt"></i> Current Traffic Statistics</h5>
                 </div>
                 <div class="card-body">
-                    <div class="row" id="current-stats">
-                        <div class="col-md-3">
-                            <div class="stat-box text-center">
-                                <h6>RX Rate</h6>
-                                <span id="rx-rate" class="stat-value">--</span>
-                                <small class="text-muted">bytes/sec</small>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="stat-box text-center">
-                                <h6>TX Rate</h6>
-                                <span id="tx-rate" class="stat-value">--</span>
-                                <small class="text-muted">bytes/sec</small>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="stat-box text-center">
-                                <h6>Total Packets RX</h6>
-                                <span id="total-rx-packets" class="stat-value">--</span>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="stat-box text-center">
-                                <h6>Total Packets TX</h6>
-                                <span id="total-tx-packets" class="stat-value">--</span>
-                            </div>
-                        </div>
+                    <div class="table-responsive">
+                        <table class="table table-bordered">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Period</th>
+                                    <th>RX Bytes/sec</th>
+                                    <th>TX Bytes/sec</th>
+                                    <th>RX Packets/sec</th>
+                                    <th>TX Packets/sec</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>5-Minute Average</strong></td>
+                                    <td id="rx-bytes-5min">--</td>
+                                    <td id="tx-bytes-5min">--</td>
+                                    <td id="rx-packets-5min">--</td>
+                                    <td id="tx-packets-5min">--</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <table class="table table-bordered mt-3">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Period</th>
+                                    <th>Total RX Bytes</th>
+                                    <th>Total TX Bytes</th>
+                                    <th>Total RX Packets</th>
+                                    <th>Total TX Packets</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>24-Hour Total</strong></td>
+                                    <td id="total-rx-bytes-24h">--</td>
+                                    <td id="total-tx-bytes-24h">--</td>
+                                    <td id="total-rx-packets-24h">--</td>
+                                    <td id="total-tx-packets-24h">--</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Traffic Graphs -->
+    <!-- Real-time Traffic -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5><i class="fas fa-tachometer-alt"></i> Real-time Traffic</h5>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container" style="position: relative; height: 300px;">
+                        <canvas id="realtime-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Historical Traffic Graphs -->
     <div class="row">
         <div class="col-12">
             <div class="card">
                 <div class="card-header">
                     <div class="d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-chart-area"></i> Traffic Graphs</h5>
+                        <h5><i class="fas fa-chart-area"></i> Historical Traffic</h5>
                         <div class="btn-group" role="group">
                             <button type="button" class="btn btn-outline-primary active" data-range="-1h">1 Hour</button>
                             <button type="button" class="btn btn-outline-primary" data-range="-6h">6 Hours</button>
@@ -145,41 +175,70 @@
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
 <script>
 let currentRange = '-1h';
-let realtimeChart;
 let realtimeData = {
     labels: [],
-    datasets: [{
-        label: 'RX (bytes/sec)',
-        data: [],
-        borderColor: 'rgb(75, 192, 192)',
-        backgroundColor: 'rgba(75, 192, 192, 0.2)',
-        tension: 0.1
-    }, {
-        label: 'TX (bytes/sec)',
-        data: [],
-        borderColor: 'rgb(255, 99, 132)',
-        backgroundColor: 'rgba(255, 99, 132, 0.2)',
-        tension: 0.1
-    }]
+    datasets: [
+        {
+            label: 'RX Bytes/s',
+            data: [],
+            borderColor: 'rgba(54, 162, 235, 1)',
+            backgroundColor: 'rgba(54, 162, 235, 0.2)',
+            borderWidth: 2,
+            tension: 0.1,
+            fill: true
+        },
+        {
+            label: 'TX Bytes/s',
+            data: [],
+            borderColor: 'rgba(255, 99, 132, 1)',
+            backgroundColor: 'rgba(255, 99, 132, 0.2)',
+            borderWidth: 2,
+            tension: 0.1,
+            fill: true
+        }
+    ]
 };
+
+let realtimeChart;
+let lastRxBytes = 0;
+let lastTxBytes = 0;
+let lastUpdateTime = Date.now();
+const MAX_POINTS = 60; // Keep last 60 data points (1 minute at 1s intervals)
 
 // Initialize real-time chart
 function initRealtimeChart() {
     const ctx = document.getElementById('realtime-chart').getContext('2d');
+    
     realtimeChart = new Chart(ctx, {
         type: 'line',
         data: realtimeData,
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            animation: {
+                duration: 0 // Disable animations for better performance
+            },
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
             scales: {
                 x: {
-                    type: 'time',
+                    type: 'realtime',
+                    realtime: {
+                        duration: 60000, // Show 60 seconds of data
+                        refresh: 1000,   // Update every second
+                        delay: 100,      // Small delay for smoother updates
+                        onRefresh: updateRealtimeData
+                    },
                     time: {
-                        unit: 'second',
                         displayFormats: {
                             second: 'HH:mm:ss'
                         }
+                    },
+                    title: {
+                        display: true,
+                        text: 'Time'
                     }
                 },
                 y: {
@@ -192,11 +251,60 @@ function initRealtimeChart() {
             },
             plugins: {
                 legend: {
-                    display: true
+                    position: 'top',
+                    labels: {
+                        usePointStyle: true
+                    }
+                },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false
                 }
             }
         }
     });
+}
+
+// Update real-time data
+function updateRealtimeData(chart) {
+    const now = Date.now();
+    fetch(`/api/camera/{{ camera.id }}/traffic/current`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const timeElapsed = (now - lastUpdateTime) / 1000; // in seconds
+                lastUpdateTime = now;
+                
+                // Calculate bytes per second
+                const rxRate = lastRxBytes > 0 ? (data.rx_bytes - lastRxBytes) / timeElapsed : 0;
+                const txRate = lastTxBytes > 0 ? (data.tx_bytes - lastTxBytes) / timeElapsed : 0;
+                
+                // Update last values
+                lastRxBytes = data.rx_bytes;
+                lastTxBytes = data.tx_bytes;
+                
+                // Add new data point
+                const time = new Date(now);
+                
+                // Add to chart data
+                chart.data.labels.push(time);
+                chart.data.datasets[0].data.push({x: time, y: rxRate});
+                chart.data.datasets[1].data.push({x: time, y: txRate});
+                
+                // Remove old data points
+                if (chart.data.labels.length > MAX_POINTS) {
+                    chart.data.labels.shift();
+                    chart.data.datasets[0].data.shift();
+                    chart.data.datasets[1].data.shift();
+                }
+                
+                // Update chart
+                chart.update('none'); // 'none' for better performance
+            }
+        })
+        .catch(error => {
+            console.error('Error updating real-time data:', error);
+        });
 }
 
 // Load traffic graph
@@ -232,20 +340,30 @@ function loadTrafficGraph(range = '-1h') {
 
 // Update current statistics
 function updateCurrentStats() {
-    fetch(`/api/camera/{{ camera.id }}/traffic/current`)
+    fetch(`/api/camera/{{ camera.id }}/traffic/summary`)
         .then(response => response.json())
         .then(data => {
-            if (data.success && data.rates) {
-                document.getElementById('rx-rate').textContent = formatBytes(data.rates.rx_bytes_per_sec || 0);
-                document.getElementById('tx-rate').textContent = formatBytes(data.rates.tx_bytes_per_sec || 0);
-                document.getElementById('total-rx-packets').textContent = (data.stats.rx_packets || 0).toLocaleString();
-                document.getElementById('total-tx-packets').textContent = (data.stats.tx_packets || 0).toLocaleString();
+            if (data.averages_5min && data.totals_24h) {
+                const avg5min = data.averages_5min;
+                const totals24h = data.totals_24h;
                 
-                // Update real-time chart
+                // Update 5-minute averages
+                document.getElementById('rx-bytes-5min').textContent = formatBytes(avg5min.rx_bytes_per_sec || 0) + '/s';
+                document.getElementById('tx-bytes-5min').textContent = formatBytes(avg5min.tx_bytes_per_sec || 0) + '/s';
+                document.getElementById('rx-packets-5min').textContent = (avg5min.rx_packets_per_sec || 0).toFixed(1) + '/s';
+                document.getElementById('tx-packets-5min').textContent = (avg5min.tx_packets_per_sec || 0).toFixed(1) + '/s';
+                
+                // Update 24-hour totals
+                document.getElementById('total-rx-bytes-24h').textContent = formatBytes(totals24h.rx_bytes || 0);
+                document.getElementById('total-tx-bytes-24h').textContent = formatBytes(totals24h.tx_bytes || 0);
+                document.getElementById('total-rx-packets-24h').textContent = (totals24h.rx_packets || 0).toLocaleString();
+                document.getElementById('total-tx-packets-24h').textContent = (totals24h.tx_packets || 0).toLocaleString();
+                
+                // Update real-time chart with current rates
                 const now = new Date();
                 realtimeData.labels.push(now);
-                realtimeData.datasets[0].data.push(data.rates.rx_bytes_per_sec || 0);
-                realtimeData.datasets[1].data.push(data.rates.tx_bytes_per_sec || 0);
+                realtimeData.datasets[0].data.push(avg5min.rx_bytes_per_sec || 0);
+                realtimeData.datasets[1].data.push(avg5min.tx_bytes_per_sec || 0);
                 
                 // Keep only last 60 data points (5 minutes at 5-second intervals)
                 if (realtimeData.labels.length > 60) {
