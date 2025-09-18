@@ -550,7 +550,7 @@ def camera_stream(camera_id):
                 ffmpeg_cmd = [
                     'ffmpeg',
                     '-rtsp_transport', 'tcp',
-                    '-timeout', '5000000',  # 5 second timeout in microseconds
+                    '-stimeout', '5000000',  # 5 second timeout in microseconds
                     '-i', test_url,
                     '-f', 'image2pipe',
                     '-c:v', 'mjpeg',
@@ -565,7 +565,7 @@ def camera_stream(camera_id):
                 test_cmd = [
                     'ffprobe',
                     '-rtsp_transport', 'tcp',
-                    '-timeout', '5000000',
+                    '-stimeout', '5000000',
                     '-i', test_url,
                     '-show_streams',
                     '-select_streams', 'v',
@@ -595,7 +595,7 @@ def camera_stream(camera_id):
                 '-hide_banner',
                 '-loglevel', 'error',
                 '-rtsp_transport', 'tcp',
-                '-timeout', '5000000',  # 5 second timeout (in microseconds)
+                '-stimeout', '5000000',  # 5 second timeout (in microseconds)
                 '-i', rtsp_url_auth,
                 '-select_streams', 'v:0',
                 '-show_entries', 'stream=width,height,r_frame_rate,bit_rate',
@@ -792,7 +792,7 @@ def camera_mjpeg(camera_id):
             'ffmpeg',
             '-loglevel', 'warning',
             '-rtsp_transport', 'tcp',
-            '-timeout', '5000000',
+            '-stimeout', '5000000',
             '-i', rtsp_url,  # Use the RTSP URL directly
             '-f', 'image2pipe',
             '-c:v', 'mjpeg',
@@ -1645,7 +1645,7 @@ def probe_rtsp_stream(rtsp_url, timeout=10):
             '-select_streams', 'v:0',  # Select first video stream
             '-show_entries', 'stream=width,height,r_frame_rate,bit_rate,codec_name:format=bit_rate',
             '-of', 'json',
-            '-timeout', str(timeout * 1000000),  # timeout in microseconds
+            '-stimeout', str(timeout * 1000000),  # timeout in microseconds
             '-rtsp_transport', 'tcp',
             '-analyzeduration', '5000000',  # 5 seconds
             '-probesize', '5000000',  # 5MB
