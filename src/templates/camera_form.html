@@ -176,7 +176,7 @@
                         <div class="input-group">
                             <input type="text" class="form-control" id="mac_address" name="mac_address" 
                                    value="{{ camera.onvif_mac if camera else camera.mac_address if camera else (defaults.mac_address if defaults else '') }}" 
-                                   pattern="^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$" required>
+                                   pattern="^([0-9A-Fa-f]{2}[:\-]){5}([0-9A-Fa-f]{2})$" required>
                             <button type="button" class="btn btn-outline-secondary" id="generate-mac-btn" title="Generate random MAC address">
                                 <i class="fas fa-random"></i> Generate
                             </button>
