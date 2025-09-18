@@ -78,37 +78,43 @@ class NetworkManager:
             self.logger.warning(f"Failed to remove FORWARD allow rules: {e}")
     
     def get_available_interfaces(self) -> List[str]:
-        """Get list of available physical network interfaces, excluding virtual interfaces"""
+        """Get list of available network interfaces, including container interfaces"""
         all_interfaces = netifaces.interfaces()
         # Common virtual interface prefixes to exclude
-        virtual_prefixes = ('lo', 'docker', 'veth', 'br-', 'virbr', 'tun', 'tap', 'vnet', 'macvtap', 'wl', 'ww')
+        virtual_prefixes = ('lo', 'docker', 'veth', 'br-', 'virbr', 'tun', 'tap', 'vnet', 'macvtap')
         
-        physical_interfaces = []
+        available_interfaces = []
         for iface in all_interfaces:
-            # Skip interfaces that match virtual prefixes
+            # Skip obvious virtual interfaces
             if any(iface.startswith(prefix) for prefix in virtual_prefixes):
                 continue
                 
-            # Skip interfaces that don't have a physical device
-            if not os.path.exists(f"/sys/class/net/{iface}/device"):
+            # Skip loopback
+            if iface == 'lo':
                 continue
                 
-            # Skip wireless interfaces (they typically start with wl or ww)
-            if iface.startswith(('wl', 'ww')):
-                continue
-                
-            # Skip interfaces that are part of a bridge or bond
+            # For container environments, we need to be more permissive
+            # Check if interface has an IP address (is UP and configured)
             try:
-                with open(f"/sys/class/net/{iface}/master/uevent", 'r') as f:
-                    if 'BRIDGE' in f.read() or 'BOND' in f.read():
-                        continue
+                addresses = netifaces.ifaddresses(iface)
+                # If interface has any IP addresses, consider it available
+                if netifaces.AF_INET in addresses or netifaces.AF_INET6 in addresses:
+                    available_interfaces.append(iface)
+                    continue
+            except ValueError:
+                pass
+            
+            # Fallback: If interface exists in /sys/class/net/ and is UP, include it
+            try:
+                with open(f"/sys/class/net/{iface}/operstate", 'r') as f:
+                    state = f.read().strip()
+                    if state == 'up':
+                        available_interfaces.append(iface)
             except (FileNotFoundError, PermissionError):
                 pass
-                
-            physical_interfaces.append(iface)
         
-        return sorted(physical_interfaces)
-    
+        return sorted(available_interfaces)
+
     def get_interface_addresses(self, interface: str) -> Dict:
         """Get current addresses for an interface"""
         try:
